@@ -397,12 +397,6 @@ fn claude_config_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// The `--config` path the user passed, if any, so setup writes back to the file
-/// it read rather than to a discovered one.
-pub fn explicit_config_path(args: &[String]) -> Option<PathBuf> {
-    scan_config_path(args)
-}
-
 fn scan_config_path(args: &[String]) -> Option<PathBuf> {
     let mut index = 0;
     while index < args.len() {
