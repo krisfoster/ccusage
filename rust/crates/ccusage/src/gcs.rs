@@ -39,6 +39,14 @@ pub(crate) trait Authorizer: Send + Sync {
     fn authorization(&self) -> Result<Option<String>>;
 }
 
+/// Lets one resolved credential serve several API clients, which also means one
+/// shared token cache instead of a fresh sign-in per client.
+impl<T: Authorizer + ?Sized> Authorizer for std::sync::Arc<T> {
+    fn authorization(&self) -> Result<Option<String>> {
+        (**self).authorization()
+    }
+}
+
 /// A fixed OAuth2 bearer token.
 pub(crate) struct BearerToken {
     value: String,

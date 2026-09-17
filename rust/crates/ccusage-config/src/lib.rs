@@ -5,6 +5,8 @@
 //! critical path of `ccusage-core` or any adapter.
 pub mod config;
 pub mod config_schema;
+pub mod writeback;
 
 pub use config::ConfigContext;
 pub use config_schema::generate_config_schema_json;
+pub use writeback::{SyncWriteback, persist_sync, sync_writeback_path};

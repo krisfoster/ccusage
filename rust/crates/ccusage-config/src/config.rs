@@ -364,6 +364,12 @@ fn load_config_value(path: Option<&Path>) -> Option<Value> {
         .find(|value| value.as_object().is_some())
 }
 
+/// The same search order the loader uses, so setup writes back to the file a later
+/// run will actually read.
+pub fn discovered_config_paths() -> Vec<PathBuf> {
+    discover_config_paths()
+}
+
 fn discover_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(cwd) = env::current_dir() {
@@ -389,6 +395,12 @@ fn claude_config_dirs() -> Vec<PathBuf> {
     ccusage_core::home::home_dir()
         .map(|home| vec![home.join(".config").join("claude"), home.join(".claude")])
         .unwrap_or_default()
+}
+
+/// The `--config` path the user passed, if any, so setup writes back to the file
+/// it read rather than to a discovered one.
+pub fn explicit_config_path(args: &[String]) -> Option<PathBuf> {
+    scan_config_path(args)
 }
 
 fn scan_config_path(args: &[String]) -> Option<PathBuf> {
