@@ -17,7 +17,7 @@ use crate::{
     Result,
     cli::{SharedArgs, SyncRunArgs},
     cli_error, format_rfc3339_millis, load_entries,
-    sync::{maintenance, rollups},
+    sync::{failures, maintenance, rollups},
 };
 
 /// The agent this build syncs. Shards are keyed by agent, so adding another is
@@ -117,7 +117,7 @@ pub(crate) fn upload(
         let body = shard.to_json().map_err(|error| error.to_string())?;
         store
             .put(&key, &body, "application/json", &Precondition::None)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| failures::explain(&error))?;
         written.push(shard.utc_date.clone());
     }
     if written.is_empty() {
@@ -201,6 +201,10 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
         machine_id,
     } = super::connect(config)?;
 
+    // Before anything is folded: a clock hours out files usage under the
+    // wrong dates, and no later step can tell that it did.
+    failures::check_clock(bucket_time_ms(&store, &keys), now_ms()).map_err(cli_error)?;
+
     let entries = load_entries(&SharedArgs::with_defaults(), None)?;
     let context = FoldContext {
         agent: AGENT,
@@ -274,6 +278,18 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     Ok(())
 }
 
+/// When the bucket's own clock last touched the manifest, as the reference
+/// for this machine's clock. A bucket nobody has written yet has nothing to
+/// compare against, and neither does a store that reports no times.
+fn bucket_time_ms(store: &dyn ObjectStore, keys: &KeySpace) -> Option<i64> {
+    let key = keys.manifest();
+    store
+        .get(&key)
+        .ok()
+        .flatten()
+        .and_then(|(_, meta)| meta.updated_ms)
+}
+
 /// Without the bucket's salt this machine's hashes would not intersect anyone
 /// else's, so a missing or malformed one stops the run rather than uploading
 /// data nothing can merge.
@@ -297,7 +313,7 @@ fn iso_now() -> String {
 #[cfg(test)]
 mod tests {
     use ccusage_sync::{FoldContext, FoldEntry, Salt};
-    use ccusage_test_support::objectstore::MemoryStore;
+    use ccusage_test_support::objectstore::{Fault, MemoryStore};
 
     use super::*;
 
@@ -386,6 +402,71 @@ mod tests {
 
         assert!(plan.uploads.is_empty());
         assert_eq!(plan.unchanged, 1);
+    }
+
+    /// Going offline part-way through must leave the index untouched, so the
+    /// next run re-uploads rather than believing a shard it never wrote.
+    #[test]
+    fn an_upload_that_loses_the_network_records_nothing_and_says_a_re_run_resumes() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let plan = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+        store.fail_next(Fault::Network);
+
+        let error =
+            upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect_err("offline");
+
+        assert!(error.contains("could not be reached"), "{error}");
+        assert!(
+            machine::load_index(&store, &keys, USER, MACHINE)
+                .expect("index")
+                .shards
+                .is_empty()
+        );
+        let retried = upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS)
+            .expect("upload after reconnecting");
+        assert_eq!(retried, vec!["2026-09-17".to_string()]);
+    }
+
+    /// The state a crash between the shard write and the index write leaves
+    /// behind: the object is there, nothing points at it. The next run must
+    /// converge on its own, without the user reaching for `sync repair`.
+    #[test]
+    fn a_shard_left_unindexed_by_a_crash_is_re_uploaded_and_indexed_next_run() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let mut orphan = shards(&salt, 10);
+        let key = keys
+            .shard(
+                USER,
+                MACHINE,
+                AGENT,
+                UtcDate::new(2026, 9, 17).expect("date"),
+            )
+            .expect("key");
+        orphan[0].finish().expect("hash");
+        store
+            .put(
+                &key,
+                &orphan[0].to_json().expect("json"),
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("orphan shard");
+
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        let plan = plan_uploads(shards(&salt, 10), &index, AGENT);
+        upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect("upload");
+
+        assert_eq!(plan.uploads.len(), 1);
+        let recorded = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        assert!(
+            recorded
+                .shards
+                .contains_key(&MachineIndex::entry_key(AGENT, "2026-09-17"))
+        );
     }
 
     #[test]
