@@ -755,11 +755,38 @@ Also settled here: share links are signed through the IAM Credentials `signBlob`
 no private key on the machine and no RSA implementation in the binary. That is what lets DR-05's
 cut stand without stranding headless users.
 
+### DR-12 — Two buckets, because a condition on `allUsers` is rejected (supersedes DR-11.1)
+
+The first real deploy against GCS failed outright:
+
+```
+LintValidationUnits/PublicResourceAllowConditionCheck Error: Conditions are not allowed on
+public resources.
+```
+
+DR-11.1's containment — a public binding scoped by an IAM condition to `KeySpace::public_prefix()`
+— is not expressible. GCS treats `allUsers` as a public resource and refuses any condition on it,
+so the choice is a bucket that is entirely public or one that is not; a public *prefix* does not
+exist as an enforceable thing.
+
+**Decision.** The page moves to its own bucket, `<data-bucket>-dashboard`, created on demand by
+`sync dashboard --deploy` with public access prevention `inherited` and an unconditional
+`allUsers` object-viewer binding. It holds the shell, the published price table, and the
+equivalence map, and nothing else. The data bucket is now created with public access prevention
+**`enforced`**, which DR-11.1 could not allow: it no longer has to serve anything public, so it can
+refuse to. Shards, manifests, salts, rollups, and `rollup/keys.json` stay there and are reachable
+only through credentials or a time-boxed signed URL.
+
+The boundary is therefore the thing GCS actually enforces (the bucket), checked twice: by the
+bucket the upload goes to, and by the key space, where `dashboard_asset` remains the only
+constructor yielding a public key.
+
 ### Still open
 
-- **P0-02 (public page / private data on a real bucket)** — blocked: needs a billing-enabled GCP
-  project. Nothing in Phase 1 depends on it; P5-05/P5-08 do. DR-05 reduces its blast radius, since
-  the default share path no longer depends on browser Google sign-in working on
+- **P0-02 (public page / private data on a real bucket)** — partly answered the hard way: a real
+  deploy disproved the conditional binding (DR-12). A full publish and read-back of the two-bucket
+  shape still needs a billing-enabled GCP project. DR-05 reduces its blast radius, since the
+  default share path no longer depends on browser Google sign-in working on
   `storage.googleapis.com`.
 - **P0-01** (credential matrix + `cargo bloat` deltas) — partially pre-empted by DR-05 (no RSA
   needed for rung 3); the service-account RS256 question remains for headless users.
