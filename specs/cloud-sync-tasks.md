@@ -76,7 +76,14 @@ print-access-token` → metadata server, with a token cache that refreshes 60s b
 exhaustion error that names every rung it tried. Service-account and external-account files are
 rejected with remediation rather than pulling in an RSA signer (DR-05). Both are tested against a
 scripted loopback server in `ccusage-test-support`, so the assertions are on the bytes that go out.
-P1-06 (bucket admin) is next.
+P1-06 then landed `gcs::bucket`: an idempotent `ensure` (get, create, and a 409 re-read so a second
+machine adopts the winner's bucket), uniform bucket-level access forced on at creation, soft delete
+off, a `publicAccessPrevention` toggle, CORS limited to GET/HEAD, and a conditional `allUsers`
+object-viewer binding whose expression is built from `KeySpace::public_prefix` so the grant cannot
+reach past the dashboard prefix. `signBlob` goes through the IAM Credentials API, so share links can
+be minted without a private key on the machine. The request plumbing is now a shared `JsonApi` —
+`GcsStore` and `BucketAdmin` use the same authorization, status mapping and backoff. Phase 1 is
+complete; Phase 2 (`sync setup`) is next, and P0-02 still needs a billing-enabled project.
 
 ---
 
