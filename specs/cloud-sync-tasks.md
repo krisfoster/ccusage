@@ -40,6 +40,13 @@ No production code ships from this phase. Every task's deliverable is a decision
 | P0-11 | **Shared log-tree prevalence** (S4). How often is one `~/.claude/projects` visible to two machines (Dropbox/iCloud/NFS/devcontainer bind mounts)? | — | S | ⚪ | Decides whether P3-07 is a must-have or a thin safety net, and whether detection-at-setup (warn on network volumes) is the better fix. |
 | P0-09 | **Fold decisions into the design doc**; open follow-up issues for anything descoped. | P0-01…08, P0-10, P0-11 | S | ⚪ | Design doc has a Decision Record section; task list below amended where a spike changed it. Includes re-reviewing A1/C1 from the review doc. |
 
+**Status.** P0-03, P0-04, P0-05, P0-06, P0-07 and P0-10 are answered — see §9 "Decision Record"
+of the design doc (DR-03…DR-10). Two of them changed the design rather than confirming it: DR-04
+replaces provider-derived identity with a bucket-derived user ID (so no credential file is ever
+read), and DR-05 cuts the built-in OAuth client from v1, which shrinks P2-04 and removes the
+browser-sign-in dependency from the default share path. P0-02 remains blocked on a billing-enabled
+GCP project; P0-01, P0-08 and P0-11 are not yet run and gate nothing in Phase 1.
+
 Exit criteria for the phase: P0-01, P0-02, P0-03, P0-04, P0-10 answered. P0-05/06/07/08/11 may
 trail into Phase 1 if they only affect later phases — but P0-06 must land before P3-01 and P0-05
 before P2-04.
@@ -57,6 +64,10 @@ before P2-04.
 | P1-05 | Credential providers: env, file, ADC (file + `gcloud` fallback + metadata server), HMAC; token cache with expiry. | P0-01 | L | 🟡 | Resolution order tested; errors name the source that was tried. |
 | P1-06 | Bucket admin ops: `get_bucket`, `create_bucket` (UBLA, PAP, location, soft-delete, lifecycle), `patch_bucket` (**PAP enforce ⇄ inherited**, website config), `set_iam_policy` (conditional binding), `set_cors`, and IAM `signBlob` (needed for Mode B signing under ADC, where no HMAC secret exists). | P1-04 | M | 🟡 | Unit-tested against mocked responses incl. 409/403 paths and an org-policy-pinned PAP failure. |
 | P1-07 | Optional keychain storage behind a cargo feature; size-checked. | P1-05 | S | ⚪ | Off by default if it costs more than the budget allows. |
+
+**Status.** P1-01, P1-02 and P1-03 have landed on `dashboard`: the `ccusage-objectstore` crate
+(keys, error taxonomy, `ObjectStore`, V4 signer pinned to the published `get-vanilla` vector) and
+the `MemoryStore` double in `ccusage-test-support`. P1-04 is next.
 
 ---
 

@@ -615,3 +615,121 @@ snapshot updates; `LOG_LEVEL=0` for captured output.
 - **Open:** retention/pruning policy defaults (keep forever? 24 months?).
 - **Open:** do we want team mode (several users → one bucket) in the layout now? The layout already
   has `users/<userId>/`, so it is possible, but IAM/ACL guidance would need writing.
+
+---
+
+## 9. Decision Record (Phase 0 spikes)
+
+Dated 2026-09-17. Each entry records what was probed, what was found, and what the finding changes
+in this design. Where a decision contradicts an earlier section, **this section wins** and the
+affected task in `specs/cloud-sync-tasks.md` is annotated.
+
+### DR-03 — Machine identity (P0-03 / S3)
+
+Probed: `/etc/machine-id` and `/var/lib/dbus/machine-id` on this Linux host (both present,
+identical, 32 hex chars); DMI `product_uuid` (absent — unreadable without root even where it
+exists). Surveyed the documented behavior of `IOPlatformUUID` (macOS, IOKit) and
+`HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` (Windows).
+
+Every hardware-rooted source has a collision or churn mode that matters for us:
+
+| Source | Collides when | Churns when |
+|---|---|---|
+| `/etc/machine-id` | VM/VPS cloned without truncating it; container images that bake a non-empty file | stateless boots regenerate per boot |
+| `MachineGuid` | every process-isolated Windows container from one base image | OS reinstall |
+| `IOPlatformUUID` | — | logic board replacement |
+
+Collisions are the dangerous direction: two machines sharing an ID silently interleave writes into
+one shard and corrupt the dedupe accounting. Churn only fragments the dashboard.
+
+**Decision.** The machine ID is **not** a hardware fingerprint. `ccusage sync setup` generates a
+random 128-bit ID and persists it in the local config; that is the shard key. A hardware
+fingerprint is recorded *alongside* it purely to detect a copied config (fingerprint changed but ID
+did not → warn, offer `--new-machine-id`). This removes the clone-collision class entirely, needs
+no root, leaks no hardware serials, and keeps a `sync.machineId` override for people restoring a
+backup who want continuity. Machine IDs are still salted-hashed before they reach an object key.
+
+### DR-04 — User identity (P0-04 / S11)
+
+Probed: the documented shape of `~/.claude.json` and `~/.codex/auth.json`. Two findings kill the
+"read the provider's identity" plan as a *default*:
+
+1. **It is not reliably there.** `oauthAccount` is absent for API-key users, for Bedrock/Vertex
+   users, and — per anthropics/claude-code#57026 — for Windows desktop SSO users, where only an
+   opaque `userID` hash is written. Codex keeps identity inside a JWT in `auth.json`.
+2. **Reading it means reading live credentials.** `~/.codex/auth.json` holds `access_token` and
+   `refresh_token`; `~/.claude.json` can hold `primaryApiKey`. Parsing those files to extract an
+   email puts ccusage's process in the blast radius of every credential in them, for a field we
+   only use as a cross-machine join key.
+
+**Decision.** The user ID is **bucket-derived, not provider-derived**. On the first machine,
+`sync setup` mints a random user ID and writes it into the bucket manifest. On any subsequent
+machine, `sync setup --bucket gs://…` reads the manifest and adopts the ID it finds. Cross-machine
+merging therefore works because the machines share a *bucket*, which is the thing the user actually
+authenticated to — no credential file is ever opened. §4.0's resolution chain is revised to:
+explicit `sync.userId` → manifest of the configured bucket → freshly minted random ID. Provider
+account linkage becomes an opt-in display-only field (`sync link-account`), not an identity source,
+and P3-14's salt requirement still applies to everything derived from it.
+
+### DR-05 — Built-in OAuth client (P0-05 / S9) — **no-go for v1**
+
+`devstorage.read_only`, `devstorage.read_write` and `cloud-platform` are all classified
+**sensitive** scopes. A public client requesting them needs Google's verification (domain
+ownership, branding review, privacy policy, scope justification, demo video); until verified the
+app shows the unverified-app interstitial and is capped at 100 test users. A CLI also cannot keep a
+client secret secret, so the client would be a public installed-app client with PKCE.
+
+**Decision.** Rung 3 of the auth ladder (built-in ccusage OAuth client) is **cut from v1**. The
+ladder is ADC → assisted `gcloud auth application-default login` → HMAC/service account for
+headless. The dashboard's browser sign-in inherits the same constraint: v1 ships the signed-link
+mode (Mode B) as the default share path, with viewer Google sign-in only via a client the user
+brings. Verification can be pursued later as a product decision; it is not an engineering blocker
+to remove from the critical path. This also shrinks P2-04 and de-risks P0-02.
+
+### DR-06 — Cost and object-count envelope (P0-06 / S2)
+
+Modeled against list pricing (single-region Standard: $0.020/GB-month, Class A $0.005/1,000,
+Class B $0.0004/1,000; free tier 5 GB, 5,000 Class A, 50,000 Class B per month).
+
+Heavy user, 3 agents × 2 machines × 18 months: 3,285 daily shard objects, each ~35 KB raw
+(96 sparse 15-minute cells × ~3 models) ≈ 115 MB, well inside the free storage tier. The cost
+driver is writes, not bytes: a sync touches today's shards + index + affected rollups ≈ 10 Class A
+operations, so 20 syncs/day across 2 machines ≈ 12,000 Class A/month — over the free tier, at
+about **$0.04/month**. Dashboard cold load is 3 Class B GETs (manifest, daily rollup, models
+rollup), meeting the ≤3-GET target.
+
+**Decision.** Layout confirmed, with two rules the sync engine must honor because they are what
+keeps the bill in cents: never rewrite historical shards on a routine sync, and **never `list` on
+the hot path** (listing is Class A; the index object exists precisely so we do not have to).
+
+### DR-07 — Dashboard bundle budget (P0-07 / S6)
+
+Measured the actual candidate vendor payload: uPlot 1.6.32 IIFE 51,081 B raw / 22,009 B gzip,
+its CSS 1,857 B / 772 B, Preact 10.26 11,211 B / 4,773 B, htm 1,265 B / 685 B. Vendor total
+**≈ 28 KB gzip**, against a 200 KiB budget.
+
+**Decision.** Budget is not a constraint on library choice. Set the enforced ceiling at **60 KB
+gzip for the shell** (vendor + app JS + CSS) and treat data as a separate budget, so a regression
+test can fail on accidental bloat long before 200 KiB. Vendor code is bundled, not
+CDN-loaded — a public CDN on the dashboard page would leak viewer IPs and add a third-party
+availability dependency for a 28 KB saving.
+
+### DR-10 — Price data redistribution (P0-10 / S7)
+
+ccusage already embeds LiteLLM's `model_prices_and_context_window.json`. LiteLLM is **MIT** outside
+its `enterprise/` directory, which permits copying the price data into a world-readable bucket
+object, on the condition that the copyright notice and permission notice travel with it.
+
+**Decision.** Publishing prices is permitted. P4-05 must write the MIT notice as a sibling object
+(`dashboard/licenses/litellm-LICENSE.txt`) and the dashboard must carry a visible attribution line
+plus the snapshot date. The equivalence map stays editorial and separate from the licensed data.
+
+### Still open
+
+- **P0-02 (public page / private data on a real bucket)** — blocked: needs a billing-enabled GCP
+  project. Nothing in Phase 1 depends on it; P5-05/P5-08 do. DR-05 reduces its blast radius, since
+  the default share path no longer depends on browser Google sign-in working on
+  `storage.googleapis.com`.
+- **P0-01** (credential matrix + `cargo bloat` deltas) — partially pre-empted by DR-05 (no RSA
+  needed for rung 3); the service-account RS256 question remains for headless users.
+- **P0-08**, **P0-11** — not yet run; neither gates Phase 1.
