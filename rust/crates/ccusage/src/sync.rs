@@ -5,12 +5,11 @@
 pub(crate) mod auth;
 pub(crate) mod bucket;
 pub(crate) mod project;
+pub(crate) mod status;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use ccusage_config::{
-    ConfigContext, SyncWriteback, config::explicit_config_path, persist_sync, sync_writeback_path,
-};
+use ccusage_config::{ConfigContext, SyncWriteback, persist_sync, sync_writeback_path};
 
 use crate::{
     Result,
@@ -26,11 +25,16 @@ use crate::{
 /// Multi-region US unless the user says otherwise: the data is tiny, and a
 /// multi-region survives a single region going away without a migration.
 const DEFAULT_LOCATION: &str = "US";
+/// The key layout every object lives under, versioned so a future layout can be
+/// written alongside this one instead of migrating in place.
+pub(crate) const DEFAULT_PREFIX: &str = "ccusage/v1";
 const STORAGE_ENDPOINT: &str = "https://storage.googleapis.com";
 
 pub(crate) fn run(args: SyncArgs) -> Result<()> {
+    let config = ConfigContext::from_args(&std::env::args().skip(1).collect::<Vec<_>>());
     match args.command {
-        SyncCommand::Setup(setup) => setup_sync(&setup),
+        SyncCommand::Setup(setup) => setup_sync(&setup, &config, args.config),
+        SyncCommand::Status => show_status(&config, args.json),
         other => Err(cli_error(format!(
             "`ccusage sync {}` is not available yet; it arrives in a later release.",
             other.name()
@@ -38,11 +42,30 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
     }
 }
 
+fn show_status(config: &ConfigContext, json: bool) -> Result<()> {
+    let status = status::Status::from_config(config.sync());
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status.to_json()).map_err(|error| cli_error(format!(
+                "could not render sync status as JSON: {error}"
+            )))?
+        );
+    } else {
+        println!("{}", status.to_text());
+    }
+    Ok(())
+}
+
 /// Authenticate, choose a project, create the bucket, remember all three.
 ///
 /// Every step is idempotent, so a setup interrupted halfway — or re-run after a
 /// permissions fix — resumes rather than duplicating anything.
-fn setup_sync(setup: &SyncSetupArgs) -> Result<()> {
+fn setup_sync(
+    setup: &SyncSetupArgs,
+    config: &ConfigContext,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     let credentials = Arc::new(
         auth::resolve(setup.auth, setup.non_interactive, &mut auth::TerminalPrompt)
             .map_err(|error| cli_error(error.to_string()))?,
@@ -60,8 +83,6 @@ fn setup_sync(setup: &SyncSetupArgs) -> Result<()> {
     .map_err(|error| cli_error(error.to_string()))?;
     println!("Using project {}.", project.id);
 
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let config = ConfigContext::from_args(&args);
     let configured_bucket = config
         .sync()
         .and_then(|sync| sync.bucket.as_deref())
@@ -87,7 +108,7 @@ fn setup_sync(setup: &SyncSetupArgs) -> Result<()> {
         .map_err(|error| cli_error(error.to_string()))?;
     println!("Bucket gs://{} ready in {}.", info.name, info.location);
 
-    let Some(path) = sync_writeback_path(explicit_config_path(&args).as_deref()) else {
+    let Some(path) = sync_writeback_path(config_path.as_deref()) else {
         return Err(cli_error(
             "no writable ccusage.json location could be determined; pass --config with a path"
                 .to_string(),
@@ -100,7 +121,12 @@ fn setup_sync(setup: &SyncSetupArgs) -> Result<()> {
             project_id: Some(project.id.clone()),
             bucket: Some(info.name.clone()),
             location: Some(info.location.clone()),
-            prefix: setup.prefix.clone(),
+            prefix: Some(
+                setup
+                    .prefix
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_PREFIX.to_string()),
+            ),
             ..SyncWriteback::default()
         },
     )
