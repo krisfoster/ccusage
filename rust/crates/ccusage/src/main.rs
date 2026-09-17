@@ -2,6 +2,7 @@ mod adapter;
 mod blocks;
 mod cli;
 mod commands;
+mod credentials;
 mod gcs;
 mod http;
 
