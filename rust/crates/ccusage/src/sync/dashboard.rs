@@ -333,17 +333,23 @@ fn public_data(pricing: &PricingMap) -> Vec<(String, Vec<u8>, &'static str)> {
     let map = EquivalenceMap::embedded();
     let mut models = serde_json::Map::new();
     for tier in &map.tiers {
-        for target in tier.models.values() {
+        for (provider_id, target) in &tier.models {
             if models.contains_key(target) {
                 continue;
             }
             let Some(rates) = pricing.find_exact_with_fallback(target) else {
                 continue;
             };
+            let provider = map.provider(provider_id);
             const PER_MILLION: f64 = 1_000_000.0;
             models.insert(
                 target.clone(),
                 json!({
+                    "provider": provider.map(|provider| provider.label.clone()),
+                    "tier": tier.label,
+                    // The rate itself comes from the licensed snapshot; the
+                    // link is where a reader can check it against the vendor.
+                    "source": provider.and_then(|provider| provider.pricing_url.clone()),
                     "input": rates.input * PER_MILLION,
                     "output": rates.output * PER_MILLION,
                     "cacheWrite": rates
@@ -598,6 +604,35 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("LiteLLM"))
         );
+    }
+
+    /// A target the price map cannot resolve drops out of the table without a
+    /// word, so the provider just looks like one nobody can be compared to.
+    #[test]
+    fn every_comparison_target_has_a_published_price_and_a_source() {
+        let published = public_data(&pricing());
+        let (_, bytes, _) = published
+            .iter()
+            .find(|(name, _, _)| name == "pricing.json")
+            .expect("pricing.json is published");
+        let value: Value = serde_json::from_slice(bytes).expect("valid JSON");
+        let models = value["models"].as_object().expect("a model table");
+
+        for tier in EquivalenceMap::embedded().tiers {
+            for target in tier.models.values() {
+                let row = models
+                    .get(target)
+                    .unwrap_or_else(|| panic!("{target} has no published price"));
+                assert!(
+                    row["source"]
+                        .as_str()
+                        .is_some_and(|url| url.starts_with("https://")),
+                    "{target} has no source link"
+                );
+                assert!(row["input"].as_f64().is_some());
+                assert!(row["output"].as_f64().is_some());
+            }
+        }
     }
 
     /// Everything this function returns is uploaded under the world-readable
