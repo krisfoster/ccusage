@@ -155,6 +155,7 @@ dependencies = [
  "ccusage-config",
  "ccusage-core",
  "ccusage-objectstore",
+ "ccusage-sync",
  "ccusage-test-support",
  "getrandom 0.4.3",
  "insta",
