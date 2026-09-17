@@ -70,8 +70,13 @@ taxonomy, `ObjectStore`, V4 signer pinned to the published `get-vanilla` vector)
 double in `ccusage-test-support`, and `GcsStore` in the binary crate — JSON API get/put/list/delete
 over the existing `ureq` seam, `ifGenerationMatch` preconditions (`0` for create-if-absent), and
 backoff on 429/5xx/network only, with 412 surfaced as `Conflict` on the first attempt so a CAS loop
-re-reads instead of overwriting. Tested against a scripted local listener. P1-05 is next; it
-replaces the `Authorizer` seam's hand-supplied bearer token with real credential resolution.
+re-reads instead of overwriting. P1-05 followed: the credential ladder is env access token → env
+HMAC pair → `GOOGLE_APPLICATION_CREDENTIALS` → the well-known ADC file → `gcloud auth
+print-access-token` → metadata server, with a token cache that refreshes 60s before expiry and an
+exhaustion error that names every rung it tried. Service-account and external-account files are
+rejected with remediation rather than pulling in an RSA signer (DR-05). Both are tested against a
+scripted loopback server in `ccusage-test-support`, so the assertions are on the bytes that go out.
+P1-06 (bucket admin) is next.
 
 ---
 
