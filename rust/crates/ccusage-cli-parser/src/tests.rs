@@ -476,6 +476,51 @@ fn checks_the_date_window_after_config_and_flags_are_merged() {
 }
 
 #[test]
+fn sync_setup_flags_win_over_the_config_block() {
+    let fixture = fs_fixture!({
+        "ccusage.json": r#"{
+            "sync": {
+                "projectId": "config-project",
+                "bucket": "config-bucket",
+                "prefix": "ccusage/v1",
+                "auth": { "kind": "adc" }
+            }
+        }"#,
+    });
+    let config_path = fixture.path("ccusage.json").to_string_lossy().into_owned();
+    let args = [
+        "sync",
+        "setup",
+        "--bucket",
+        "flag-bucket",
+        "--config",
+        config_path.as_str(),
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let config = ccusage_config::ConfigContext::from_args(&args);
+
+    let cli = Cli::parse_from_with_config(
+        std::iter::once(OsString::from("ccusage")).chain(args.iter().map(OsString::from)),
+        &config,
+        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("sync setup parses with a config block");
+
+    let Some(Command::Sync(sync)) = cli.command else {
+        panic!("expected a sync command");
+    };
+    let SyncCommand::Setup(setup) = sync.command else {
+        panic!("expected sync setup");
+    };
+    assert_eq!(setup.bucket.as_deref(), Some("flag-bucket"));
+    assert_eq!(setup.project.as_deref(), Some("config-project"));
+    assert_eq!(setup.prefix.as_deref(), Some("ccusage/v1"));
+    assert_eq!(setup.auth, SyncAuthMode::Adc);
+}
+
+#[test]
 fn statusline_ignores_reversed_default_date_window() {
     let fixture = fs_fixture!({
         "ccusage.json": r#"{ "defaults": { "since": "2026-09-14", "until": "2026-09-01" } }"#,

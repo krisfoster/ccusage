@@ -360,7 +360,7 @@ fn parse_command(
             STANDARD_AGENT_REPORTS,
             Command::ZCode,
         ),
-        "sync" => parse_sync_command(parser),
+        "sync" => parse_sync_command(parser, config),
         _ => Err(format!("Unknown command '{command}'")),
     }
 }
@@ -368,17 +368,17 @@ fn parse_command(
 /// The whole `sync` grammar, including the subcommands whose behavior arrives in a
 /// later release: parsing them here keeps the help text and the "not available yet"
 /// message in one place instead of turning a documented command into a parse error.
-fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
+fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<Command, String> {
     let subcommand = match parser.peek() {
         Some(token) if !token.starts_with('-') => parser.next().unwrap_or_default(),
         _ => "run".to_string(),
     };
     let mut json = false;
-    let mut config = None;
+    let mut config_path = None;
     let command = match subcommand.as_str() {
         "run" => {
             let mut args = SyncRunArgs::default();
-            parse_sync_options(parser, "run", &mut json, &mut config, |flag, _| {
+            parse_sync_options(parser, "run", &mut json, &mut config_path, |flag, _| {
                 match flag {
                     "--dry-run" => args.dry_run = true,
                     _ => return Ok(false),
@@ -389,35 +389,46 @@ fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
         }
         "setup" => {
             let mut args = SyncSetupArgs::default();
-            parse_sync_options(parser, "setup", &mut json, &mut config, |flag, parser| {
-                match flag {
-                    "--provider" => {
-                        args.provider = parse_sync_provider(&parser.value_for("--provider")?)?
+            config.apply_sync_setup_args(&mut args);
+            parse_sync_options(
+                parser,
+                "setup",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--provider" => {
+                            args.provider = parse_sync_provider(&parser.value_for("--provider")?)?
+                        }
+                        "-p" | "--project" => args.project = Some(parser.value_for("--project")?),
+                        "--bucket" => args.bucket = Some(parser.value_for("--bucket")?),
+                        "--location" => args.location = Some(parser.value_for("--location")?),
+                        "--prefix" => args.prefix = Some(parser.value_for("--prefix")?),
+                        "--auth" => args.auth = parse_sync_auth_mode(&parser.value_for("--auth")?)?,
+                        "--non-interactive" => args.non_interactive = true,
+                        "--recreate" => args.recreate = true,
+                        _ => return Ok(false),
                     }
-                    "-p" | "--project" => args.project = Some(parser.value_for("--project")?),
-                    "--bucket" => args.bucket = Some(parser.value_for("--bucket")?),
-                    "--location" => args.location = Some(parser.value_for("--location")?),
-                    "--prefix" => args.prefix = Some(parser.value_for("--prefix")?),
-                    "--auth" => args.auth = parse_sync_auth_mode(&parser.value_for("--auth")?)?,
-                    "--non-interactive" => args.non_interactive = true,
-                    "--recreate" => args.recreate = true,
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            })?;
+                    Ok(true)
+                },
+            )?;
             SyncCommand::Setup(Box::new(args))
         }
         "status" => {
-            parse_sync_options(parser, "status", &mut json, &mut config, |_, _| Ok(false))?;
+            parse_sync_options(parser, "status", &mut json, &mut config_path, |_, _| {
+                Ok(false)
+            })?;
             SyncCommand::Status
         }
         "doctor" => {
-            parse_sync_options(parser, "doctor", &mut json, &mut config, |_, _| Ok(false))?;
+            parse_sync_options(parser, "doctor", &mut json, &mut config_path, |_, _| {
+                Ok(false)
+            })?;
             SyncCommand::Doctor
         }
         "repair" => {
             let mut args = SyncRepairArgs::default();
-            parse_sync_options(parser, "repair", &mut json, &mut config, |flag, _| {
+            parse_sync_options(parser, "repair", &mut json, &mut config_path, |flag, _| {
                 match flag {
                     "--dry-run" => args.dry_run = true,
                     _ => return Ok(false),
@@ -429,7 +440,7 @@ fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
         "forget" => {
             let machine = sync_positional(parser, "forget", "machine")?;
             let mut yes = false;
-            parse_sync_options(parser, "forget", &mut json, &mut config, |flag, _| {
+            parse_sync_options(parser, "forget", &mut json, &mut config_path, |flag, _| {
                 match flag {
                     "-y" | "--yes" => yes = true,
                     _ => return Ok(false),
@@ -446,7 +457,7 @@ fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
                 parser,
                 "merge-machine",
                 &mut json,
-                &mut config,
+                &mut config_path,
                 |flag, _| {
                     match flag {
                         "-y" | "--yes" => yes = true,
@@ -464,7 +475,7 @@ fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
                 parser,
                 "dashboard",
                 &mut json,
-                &mut config,
+                &mut config_path,
                 |flag, parser| {
                     match flag {
                         "--deploy" => args.deploy = true,
@@ -488,7 +499,7 @@ fn parse_sync_command(parser: &mut ArgParser) -> Result<Command, String> {
     };
     Ok(Command::Sync(SyncArgs {
         json,
-        config,
+        config: config_path,
         command,
     }))
 }

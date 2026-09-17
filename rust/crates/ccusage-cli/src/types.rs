@@ -421,6 +421,8 @@ pub trait CliConfig {
 
     fn apply_statusline_args(&self, _args: &mut StatuslineArgs) {}
 
+    fn apply_sync_setup_args(&self, _args: &mut SyncSetupArgs) {}
+
     fn apply_agent_args(
         &self,
         _codex_speed: &mut CodexSpeed,
