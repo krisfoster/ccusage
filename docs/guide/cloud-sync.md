@@ -37,12 +37,18 @@ one, and writes the result to your [configuration file](/guide/config-files):
 		"projectId": "my-project",
 		"bucket": "ccusage-9f3a1c2b4405",
 		"location": "US",
-		"prefix": "ccusage/v1"
+		"prefix": "ccusage/v1",
+		"machineId": "a1b2c3d4",
+		"userId": "u-1234",
+		"salt": "00112233445566778899aabbccddeeff"
 	}
 }
 ```
 
-Credentials are never written to the configuration file.
+Credentials are never written to the configuration file. `salt` is not a
+credential — it is the value that makes the bucket's hashed project names
+unguessable — but every machine writing to the bucket must use the same one, so
+it is created once and kept in the bucket as well as in your configuration.
 
 ### Authentication
 
@@ -83,8 +89,11 @@ Run setup on the second machine with the bucket from the first:
 ccusage sync setup --bucket ccusage-9f3a1c2b4405
 ```
 
-It adopts the user identity recorded in the bucket and keeps its own machine
-identity, so each machine writes its own objects and nothing is overwritten.
+It adopts the user identity and hash salt recorded in the bucket and keeps its
+own machine identity, so each machine writes its own objects and nothing is
+overwritten. If that machine's configuration already names a different salt,
+setup stops: hashing with two salts would make the same activity look like two
+different sets of usage and double your totals.
 
 ## Checking the configuration
 

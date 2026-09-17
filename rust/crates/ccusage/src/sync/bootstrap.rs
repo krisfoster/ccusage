@@ -1,0 +1,266 @@
+//! The two values a bucket hands to every machine that joins it: the user ID
+//! and the hash salt.
+//!
+//! Both are created once, by whichever machine sets the bucket up first, and
+//! adopted verbatim by every machine afterwards. Both are written with
+//! `IfAbsent` so two machines running `sync setup` at the same moment cannot
+//! each mint their own — the loser of the race re-reads and adopts. Getting
+//! this wrong is not a cosmetic problem: two user IDs split one person's usage
+//! into two datasets, and two salts make the dedupe keys of the two machines
+//! disjoint, so shared activity is counted twice.
+
+use ccusage_objectstore::{KeySpace, ObjectStore, ObjectStoreError, Precondition};
+use ccusage_sync::salt::{Salt, SaltOrigin, reconcile};
+use serde_json::{Value, json};
+
+/// The manifest shape this build creates. Machine registration is a separate,
+/// compare-and-swap concern and is not part of bootstrapping.
+const MANIFEST_SCHEMA: u32 = 1;
+
+pub(crate) type Result<T> = std::result::Result<T, String>;
+
+/// Reads the bucket's salt, or writes the one this machine is going to use.
+pub(crate) fn ensure_salt(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    configured: Option<&str>,
+) -> Result<(Salt, SaltOrigin)> {
+    let key = keys.salt();
+    if let Some(existing) = read_field(store, &key, "salt")? {
+        return reconcile(Some(&existing), configured).map_err(|error| error.to_string());
+    }
+    let (salt, origin) = reconcile(None, configured).map_err(|error| error.to_string())?;
+    let body = json!({ "schema": MANIFEST_SCHEMA, "salt": salt.expose() });
+    match store.put(
+        &key,
+        body.to_string().as_bytes(),
+        "application/json",
+        &Precondition::IfAbsent,
+    ) {
+        Ok(_) => Ok((salt, origin)),
+        // Another machine set the bucket up between the read and the write; its
+        // salt is the bucket's salt, and minting a second one here would make
+        // the two machines' hashes disjoint forever.
+        Err(ObjectStoreError::Conflict { .. }) => {
+            let existing = read_field(store, &key, "salt")?
+                .ok_or_else(|| "the bucket's salt vanished mid-setup; re-run setup".to_string())?;
+            reconcile(Some(&existing), configured).map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The user ID recorded in the bucket, if the bucket has been set up before.
+///
+/// A second machine adopts this rather than minting its own, which is what
+/// makes "point machine two at the same bucket" the whole of joining.
+pub(crate) fn manifest_user_id(store: &dyn ObjectStore, keys: &KeySpace) -> Result<Option<String>> {
+    read_field(store, &keys.manifest(), "userId")
+}
+
+/// Records the user ID for later machines. Never overwrites: the manifest is a
+/// multi-writer object and rewriting it here would clobber a concurrent setup.
+pub(crate) fn ensure_manifest(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+) -> Result<()> {
+    let key = keys.manifest();
+    if manifest_user_id(store, keys)?.is_some() {
+        return Ok(());
+    }
+    let body = json!({ "schema": MANIFEST_SCHEMA, "userId": user_id });
+    match store.put(
+        &key,
+        body.to_string().as_bytes(),
+        "application/json",
+        &Precondition::IfAbsent,
+    ) {
+        Ok(_) | Err(ObjectStoreError::Conflict { .. }) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn read_field(
+    store: &dyn ObjectStore,
+    key: &ccusage_objectstore::Key,
+    field: &str,
+) -> Result<Option<String>> {
+    let Some((body, _)) = store.get(key).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let document: Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("{} is not readable JSON: {error}", key.path()))?;
+    Ok(document
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell as MutCell;
+
+    use ccusage_objectstore::{Key, ObjectMeta};
+    use ccusage_test_support::objectstore::MemoryStore;
+
+    use super::*;
+
+    const SALT: &str = "00112233445566778899aabbccddeeff";
+    const OTHER_SALT: &str = "ffeeddccbbaa99887766554433221100";
+
+    fn keys() -> KeySpace {
+        KeySpace::new("ccusage/v1").expect("prefix")
+    }
+
+    fn seeded_salt(store: &MemoryStore, keys: &KeySpace, salt: &str) {
+        store
+            .put(
+                &keys.salt(),
+                json!({ "schema": 1, "salt": salt }).to_string().as_bytes(),
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("seed");
+    }
+
+    #[test]
+    fn the_first_machine_mints_and_publishes_a_salt() {
+        let store = MemoryStore::new();
+        let keys = keys();
+
+        let (salt, origin) = ensure_salt(&store, &keys, None).expect("bootstrap");
+
+        assert_eq!(origin, SaltOrigin::Minted);
+        let (published, _) = store.get(&keys.salt()).expect("get").expect("written");
+        let document: Value = serde_json::from_slice(&published).expect("json");
+        assert_eq!(document["salt"], salt.expose());
+    }
+
+    #[test]
+    fn a_second_machine_adopts_the_bucket_salt_rather_than_minting_one() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        seeded_salt(&store, &keys, SALT);
+
+        let (salt, origin) = ensure_salt(&store, &keys, None).expect("bootstrap");
+
+        assert_eq!(salt.expose(), SALT);
+        assert_eq!(origin, SaltOrigin::Bucket);
+    }
+
+    /// Hashing with a salt the bucket does not know produces keys that never
+    /// intersect, so every entry both machines saw would be counted twice.
+    #[test]
+    fn a_config_salt_that_contradicts_the_bucket_stops_setup() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        seeded_salt(&store, &keys, SALT);
+
+        let error = ensure_salt(&store, &keys, Some(OTHER_SALT)).expect_err("a mismatch is fatal");
+
+        assert!(
+            error.contains("not the one the bucket was set up with"),
+            "{error}"
+        );
+    }
+
+    /// A store where another machine writes the salt between this machine's
+    /// read and its write — the window `IfAbsent` exists to close.
+    struct RaceLostStore {
+        inner: MemoryStore,
+        keys: KeySpace,
+        raced: MutCell<bool>,
+    }
+
+    impl ObjectStore for RaceLostStore {
+        fn get(&self, key: &Key) -> ccusage_objectstore::Result<Option<(Vec<u8>, ObjectMeta)>> {
+            self.inner.get(key)
+        }
+
+        fn put(
+            &self,
+            key: &Key,
+            body: &[u8],
+            content_type: &str,
+            precondition: &Precondition,
+        ) -> ccusage_objectstore::Result<ObjectMeta> {
+            if !self.raced.replace(true) {
+                seeded_salt(&self.inner, &self.keys, SALT);
+            }
+            self.inner.put(key, body, content_type, precondition)
+        }
+
+        fn list(&self, prefix: &str) -> ccusage_objectstore::Result<Vec<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        fn delete(
+            &self,
+            key: &Key,
+            precondition: &Precondition,
+        ) -> ccusage_objectstore::Result<()> {
+            self.inner.delete(key, precondition)
+        }
+    }
+
+    /// Two machines setting the bucket up at the same moment must not end with
+    /// one of them using a salt the bucket never stored.
+    #[test]
+    fn losing_the_creation_race_adopts_the_winners_salt() {
+        let keys = keys();
+        let store = RaceLostStore {
+            inner: MemoryStore::new(),
+            keys: keys.clone(),
+            raced: MutCell::new(false),
+        };
+
+        let (salt, origin) = ensure_salt(&store, &keys, None).expect("bootstrap");
+
+        assert_eq!(salt.expose(), SALT);
+        assert_eq!(origin, SaltOrigin::Bucket);
+    }
+
+    #[test]
+    fn the_manifest_carries_the_user_id_to_the_next_machine() {
+        let store = MemoryStore::new();
+        let keys = keys();
+
+        ensure_manifest(&store, &keys, "u-1234").expect("write");
+
+        assert_eq!(
+            manifest_user_id(&store, &keys).expect("read"),
+            Some("u-1234".to_string())
+        );
+    }
+
+    #[test]
+    fn a_rerun_of_setup_leaves_an_existing_user_id_alone() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        ensure_manifest(&store, &keys, "u-first").expect("write");
+
+        ensure_manifest(&store, &keys, "u-second").expect("write");
+
+        assert_eq!(
+            manifest_user_id(&store, &keys).expect("read"),
+            Some("u-first".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_manifest_is_an_error_rather_than_a_fresh_identity() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        store
+            .put(
+                &keys.manifest(),
+                b"not json",
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("seed");
+
+        assert!(manifest_user_id(&store, &keys).is_err());
+    }
+}

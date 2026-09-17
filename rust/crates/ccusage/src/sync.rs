@@ -3,6 +3,7 @@
 //! looking like a typo.
 
 pub(crate) mod auth;
+pub(crate) mod bootstrap;
 pub(crate) mod bucket;
 pub(crate) mod doctor;
 pub(crate) mod project;
@@ -19,6 +20,7 @@ use ccusage_config::{
     sync_writeback_path,
 };
 use ccusage_objectstore::KeySpace;
+use ccusage_sync::identity::{IdentityInputs, os_entropy, resolve_identity};
 
 use crate::{
     Result,
@@ -203,6 +205,36 @@ fn setup_sync(
         .map_err(|error| cli_error(error.to_string()))?;
     println!("Bucket gs://{} ready in {}.", info.name, info.location);
 
+    let prefix = setup
+        .prefix
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PREFIX.to_string());
+    let keys = KeySpace::new(&prefix).map_err(|error| cli_error(error.to_string()))?;
+    let store = GcsStore::new(&info.name, Box::new(Arc::clone(&credentials)));
+    let sync_config = config.sync();
+    let (salt, _) = bootstrap::ensure_salt(
+        &store,
+        &keys,
+        sync_config.and_then(|sync| sync.salt.as_deref()),
+    )
+    .map_err(cli_error)?;
+
+    // The bucket's user ID wins over a freshly minted one, so pointing a second
+    // machine at an existing bucket is the whole of joining it.
+    let manifest_user_id = bootstrap::manifest_user_id(&store, &keys).map_err(cli_error)?;
+    let identity = resolve_identity(
+        &IdentityInputs {
+            configured_user_id: sync_config.and_then(|sync| sync.user_id.as_deref()),
+            manifest_user_id: manifest_user_id.as_deref(),
+            configured_machine_id: sync_config.and_then(|sync| sync.machine_id.as_deref()),
+            ..IdentityInputs::default()
+        },
+        &mut os_entropy,
+    )
+    .map_err(|error| cli_error(error.to_string()))?;
+    bootstrap::ensure_manifest(&store, &keys, identity.user.as_str()).map_err(cli_error)?;
+    println!("Syncing as machine {}.", identity.machine);
+
     let Some(path) = sync_writeback_path(config_path.as_deref()) else {
         return Err(cli_error(
             "no writable ccusage.json location could be determined; pass --config with a path"
@@ -216,13 +248,10 @@ fn setup_sync(
             project_id: Some(project.id.clone()),
             bucket: Some(info.name.clone()),
             location: Some(info.location.clone()),
-            prefix: Some(
-                setup
-                    .prefix
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_PREFIX.to_string()),
-            ),
-            ..SyncWriteback::default()
+            prefix: Some(prefix),
+            machine_id: Some(identity.machine.to_string()),
+            user_id: Some(identity.user.to_string()),
+            salt: Some(salt.expose().to_string()),
         },
     )
     .map_err(cli_error)?;

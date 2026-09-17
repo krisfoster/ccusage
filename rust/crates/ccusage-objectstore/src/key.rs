@@ -168,6 +168,14 @@ impl KeySpace {
         self.private("manifest.json")
     }
 
+    /// The per-bucket hash salt every machine writing here must share.
+    ///
+    /// Private by construction: publishing it would make every hashed project
+    /// path in the dashboard reversible by dictionary attack.
+    pub fn salt(&self) -> Key {
+        self.private("salt.json")
+    }
+
     pub fn machine(&self, user_id: &str, machine_id: &str) -> Result<Key> {
         Ok(self.private(&format!(
             "{}machine.json",
@@ -272,6 +280,7 @@ mod tests {
     fn builds_the_documented_layout() {
         let s = space();
         assert_eq!(s.manifest().path(), "ccusage/v1/manifest.json");
+        assert_eq!(s.salt().path(), "ccusage/v1/salt.json");
         assert_eq!(
             s.machine("u1", "m1").unwrap().path(),
             "ccusage/v1/users/u1/machines/m1/machine.json"
@@ -300,6 +309,7 @@ mod tests {
     fn classifies_only_dashboard_assets_as_public() {
         let s = space();
         assert_eq!(s.manifest().visibility(), Visibility::Private);
+        assert_eq!(s.salt().visibility(), Visibility::Private);
         assert_eq!(
             s.machine("u1", "m1").unwrap().visibility(),
             Visibility::Private

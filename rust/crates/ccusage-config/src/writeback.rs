@@ -27,6 +27,9 @@ pub struct SyncWriteback {
     pub prefix: Option<String>,
     pub machine_id: Option<String>,
     pub user_id: Option<String>,
+    /// Not a credential: it only makes the bucket's hashes unguessable, and
+    /// every machine writing to the bucket needs the same one.
+    pub salt: Option<String>,
 }
 
 impl SyncWriteback {
@@ -39,6 +42,7 @@ impl SyncWriteback {
             ("prefix", self.prefix.as_ref()),
             ("machineId", self.machine_id.as_ref()),
             ("userId", self.user_id.as_ref()),
+            ("salt", self.salt.as_ref()),
         ]
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key, value)))
@@ -246,6 +250,7 @@ mod tests {
                 prefix: Some("ccusage/v1".to_string()),
                 machine_id: Some("a1b2c3".to_string()),
                 user_id: Some("u-1234".to_string()),
+                salt: Some("00112233445566778899aabbccddeeff".to_string()),
             },
         )
         .expect("persist");
@@ -261,6 +266,7 @@ mod tests {
             "prefix",
             "machineId",
             "userId",
+            "salt",
         ];
         for key in written["sync"].as_object().expect("sync block").keys() {
             assert!(allowed.contains(&key.as_str()), "setup wrote '{key}'");

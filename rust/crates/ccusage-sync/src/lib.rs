@@ -6,6 +6,7 @@
 //! arrive as inputs and the caller decides what to persist or upload.
 pub mod fingerprint;
 pub mod identity;
+pub mod salt;
 pub mod shard;
 
 pub use fingerprint::{FingerprintSources, observe_fingerprint};
@@ -13,6 +14,7 @@ pub use identity::{
     IdentityError, IdentityInputs, IdentityOrigin, IdentityWarning, MachineId, ResolvedIdentity,
     UserId, hash_identifier, os_entropy, resolve_identity,
 };
+pub use salt::{DEDUPE_ALGORITHM, Salt, SaltError, SaltOrigin};
 pub use shard::{
     BUCKETS_PER_DAY, Cell, Dedupe, DedupeKey, ParsedShard, SHARD_SCHEMA, Session, Shard, ShardError,
 };

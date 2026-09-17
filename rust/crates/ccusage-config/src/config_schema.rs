@@ -82,6 +82,9 @@ pub struct SyncConfig {
     pub machine_label: Option<String>,
     /// Identifier shared by every machine that syncs into this bucket.
     pub user_id: Option<String>,
+    /// Per-bucket salt every hash in the bucket is built from, adopted from the
+    /// bucket at setup. Machines that disagree about it cannot deduplicate.
+    pub salt: Option<String>,
     /// Agents whose usage is synced.
     pub agents: Option<Vec<String>>,
     /// Replace project names with salted hashes before uploading.
