@@ -152,6 +152,7 @@ dependencies = [
  "ccusage-cli-parser",
  "ccusage-config",
  "ccusage-core",
+ "ccusage-objectstore",
  "ccusage-test-support",
  "insta",
  "mimalloc",
