@@ -436,6 +436,17 @@
 			"description": "Display this help message"
 		}
 	],
+	"compare_options": [
+		{
+			"flags": "--provider <provider>",
+			"description": "Compare against one provider only (e.g. zai)",
+			"default": "every provider in the map"
+		},
+		{
+			"flags": "--equivalence <path>",
+			"description": "Use a custom model-equivalence map instead of the built-in one"
+		}
+	],
 	"sync_run_options": [
 		{
 			"flags": "--dry-run",

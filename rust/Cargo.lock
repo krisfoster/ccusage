@@ -152,6 +152,7 @@ dependencies = [
  "ccusage-adapter-zcode",
  "ccusage-cli",
  "ccusage-cli-parser",
+ "ccusage-compare",
  "ccusage-config",
  "ccusage-core",
  "ccusage-objectstore",
@@ -449,6 +450,14 @@ dependencies = [
  "ccusage-core",
  "ccusage-test-support",
  "insta",
+ "serde_json",
+]
+
+[[package]]
+name = "ccusage-compare"
+version = "0.0.0"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 

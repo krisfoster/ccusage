@@ -3,12 +3,12 @@ use std::{ffi::OsString, path::PathBuf};
 use crate::arg_parser::ArgParser;
 use crate::help::{print_help_and_exit, print_version_and_exit};
 use ccusage_cli::{
-    AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexSpeed, Command, CostMode,
-    CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS, OPENCODE_AGENT_REPORTS,
-    STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder, StatuslineArgs, SyncArgs,
-    SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs, SyncMergeMachineArgs,
-    SyncProvider, SyncRepairArgs, SyncRunArgs, SyncSetupArgs, VisualBurnRate, WeekDay, WeeklyArgs,
-    normalize_date_bound,
+    AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexSpeed, Command, CompareArgs,
+    CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS,
+    OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder,
+    StatuslineArgs, SyncArgs, SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs,
+    SyncMergeMachineArgs, SyncProvider, SyncRepairArgs, SyncRunArgs, SyncSetupArgs, VisualBurnRate,
+    WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -361,8 +361,31 @@ fn parse_command(
             Command::ZCode,
         ),
         "sync" => parse_sync_command(parser, config),
+        "compare" => parse_compare_command(parser, shared),
         _ => Err(format!("Unknown command '{command}'")),
     }
+}
+
+/// `compare` reuses the shared report window and cost options, so a user can
+/// ask "what would last month have cost" with the flags they already know.
+fn parse_compare_command(parser: &mut ArgParser, shared: SharedArgs) -> Result<Command, String> {
+    let mut args = CompareArgs {
+        shared,
+        ..CompareArgs::default()
+    };
+    while parser.peek().is_some() {
+        if parse_shared_arg_for_command(parser, &mut args.shared)? {
+            continue;
+        }
+        match parser.next_flag()?.as_str() {
+            "--provider" => args.provider = Some(parser.value_for("--provider")?),
+            "--equivalence" => {
+                args.equivalence = Some(PathBuf::from(parser.value_for("--equivalence")?))
+            }
+            flag => return Err(format!("Unknown compare option '{flag}'")),
+        }
+    }
+    Ok(Command::Compare(args))
 }
 
 /// Retention in whole days. Zero would mean "delete everything, including
@@ -1050,6 +1073,7 @@ fn is_command(arg: &str) -> bool {
             | "grok"
             | "zcode"
             | "sync"
+            | "compare"
     )
 }
 
@@ -1325,6 +1349,7 @@ fn report_shared<'a>(
         Some(Command::Weekly(args)) => (&args.shared, true),
         Some(Command::Session(args)) => (&args.shared, false),
         Some(Command::Blocks(args)) => (&args.shared, false),
+        Some(Command::Compare(args)) => (&args.shared, false),
         Some(Command::Statusline(_) | Command::Sync(_)) => (root_shared, false),
         Some(
             Command::Codex(args)

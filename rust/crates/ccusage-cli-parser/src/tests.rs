@@ -208,6 +208,12 @@ fn command_snapshot(command: Option<Command>) -> Value {
         Some(Command::OpenClaw(args)) => agent_command_snapshot("openclaw", args),
         Some(Command::Grok(args)) => agent_command_snapshot("grok", args),
         Some(Command::ZCode(args)) => agent_command_snapshot("zcode", args),
+        Some(Command::Compare(args)) => json!({
+            "type": "compare",
+            "shared": shared_snapshot(&args.shared),
+            "provider": args.provider,
+            "equivalence": args.equivalence.map(|path| path.to_string_lossy().into_owned()),
+        }),
         Some(Command::Sync(args)) => json!({
             "type": "sync",
             "subcommand": args.command.name(),
@@ -518,6 +524,37 @@ fn sync_setup_flags_win_over_the_config_block() {
     assert_eq!(setup.project.as_deref(), Some("config-project"));
     assert_eq!(setup.prefix.as_deref(), Some("ccusage/v1"));
     assert_eq!(setup.auth, SyncAuthMode::Adc);
+}
+
+#[test]
+fn compare_takes_a_provider_a_map_and_the_shared_window() {
+    let cli = parse(&[
+        "ccusage",
+        "compare",
+        "--provider",
+        "zai",
+        "--equivalence",
+        "/tmp/map.json",
+        "--since",
+        "20250101",
+        "--json",
+    ]);
+
+    let Some(Command::Compare(args)) = cli.command else {
+        panic!("expected a compare command");
+    };
+    assert_eq!(args.provider.as_deref(), Some("zai"));
+    assert_eq!(
+        args.equivalence.as_deref(),
+        Some(std::path::Path::new("/tmp/map.json"))
+    );
+    assert_eq!(args.shared.since.as_deref(), Some("20250101"));
+    assert!(args.shared.json);
+}
+
+#[test]
+fn compare_rejects_an_option_it_does_not_have() {
+    assert!(parse_error(&["ccusage", "compare", "--instances"]).contains("compare"));
 }
 
 #[test]

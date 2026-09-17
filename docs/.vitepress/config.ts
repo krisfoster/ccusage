@@ -104,6 +104,7 @@ export default defineConfig({
 					items: [
 						{ text: 'JSON Output', link: '/guide/json-output' },
 						{ text: 'Cloud Sync', link: '/guide/cloud-sync' },
+						{ text: 'Provider Comparison', link: '/guide/provider-comparison' },
 					],
 				},
 				{

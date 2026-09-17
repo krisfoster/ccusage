@@ -29,6 +29,20 @@ pub enum Command {
     Grok(AgentCommandArgs),
     ZCode(AgentCommandArgs),
     Sync(SyncArgs),
+    Compare(CompareArgs),
+}
+
+/// `ccusage compare`: the same usage priced as though another provider had
+/// served it.
+#[derive(Clone, Debug, Default)]
+pub struct CompareArgs {
+    pub shared: SharedArgs,
+    /// A single provider to compare against. `None` compares every provider
+    /// the equivalence map knows.
+    pub provider: Option<String>,
+    /// A replacement equivalence map, for a user who disagrees with the
+    /// curated pairings.
+    pub equivalence: Option<PathBuf>,
 }
 
 /// Options every `sync` subcommand accepts, plus the subcommand itself.

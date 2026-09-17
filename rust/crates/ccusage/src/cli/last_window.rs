@@ -53,8 +53,14 @@ fn window_target(cli: &mut Cli) -> Option<(&mut SharedArgs, PeriodUnit, WeekDay)
             | Command::Grok(args)
             | Command::ZCode(args),
         ) => agent_window_target(args),
+        // `compare` totals a window rather than grouping it into periods, so
+        // there is no calendar unit for --last to count.
         Some(
-            Command::Session(_) | Command::Blocks(_) | Command::Statusline(_) | Command::Sync(_),
+            Command::Session(_)
+            | Command::Blocks(_)
+            | Command::Statusline(_)
+            | Command::Sync(_)
+            | Command::Compare(_),
         ) => None,
     }
 }
