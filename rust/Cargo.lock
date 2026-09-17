@@ -155,6 +155,7 @@ dependencies = [
  "ccusage-compare",
  "ccusage-config",
  "ccusage-core",
+ "ccusage-dashboard",
  "ccusage-objectstore",
  "ccusage-sync",
  "ccusage-test-support",
@@ -491,6 +492,10 @@ dependencies = [
  "serde_json",
  "smallvec",
 ]
+
+[[package]]
+name = "ccusage-dashboard"
+version = "0.0.0"
 
 [[package]]
 name = "ccusage-objectstore"

@@ -39,6 +39,7 @@ ccusage-adapter-zcode.workspace = true
 ccusage-cli-parser.workspace = true
 ccusage-cli.workspace = true
 ccusage-compare.workspace = true
+ccusage-dashboard.workspace = true
 ccusage-config.workspace = true
 ccusage-core.workspace = true
 ccusage-objectstore.workspace = true

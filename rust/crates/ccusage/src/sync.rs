@@ -5,6 +5,7 @@
 pub(crate) mod auth;
 pub(crate) mod bootstrap;
 pub(crate) mod bucket;
+pub(crate) mod dashboard;
 pub(crate) mod doctor;
 pub(crate) mod failures;
 pub(crate) mod machine;
@@ -59,10 +60,7 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
         SyncCommand::Repair(repair) => maintenance::execute_repair(&config, &repair),
         SyncCommand::Forget(forget) => maintenance::execute_forget(&config, &forget),
         SyncCommand::MergeMachine(merge) => maintenance::execute_merge(&config, &merge),
-        other => Err(cli_error(format!(
-            "`ccusage sync {}` is not available yet; it arrives in a later release.",
-            other.name()
-        ))),
+        SyncCommand::Dashboard(dashboard_args) => dashboard::execute(&config, &dashboard_args),
     }
 }
 

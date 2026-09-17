@@ -41,6 +41,7 @@ ccusage-compare = { path = "crates/ccusage-compare" }
 ccusage-cli-parser = { path = "crates/ccusage-cli-parser" }
 ccusage-config = { path = "crates/ccusage-config" }
 ccusage-core = { path = "crates/ccusage-core" }
+ccusage-dashboard = { path = "crates/ccusage-dashboard" }
 ccusage-objectstore = { path = "crates/ccusage-objectstore" }
 ccusage-sync = { path = "crates/ccusage-sync" }
 ccusage-terminal = { path = "crates/ccusage-terminal" }
