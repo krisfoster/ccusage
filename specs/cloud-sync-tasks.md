@@ -65,9 +65,13 @@ before P2-04.
 | P1-06 | Bucket admin ops: `get_bucket`, `create_bucket` (UBLA, PAP, location, soft-delete, lifecycle), `patch_bucket` (**PAP enforce ⇄ inherited**, website config), `set_iam_policy` (conditional binding), `set_cors`, and IAM `signBlob` (needed for Mode B signing under ADC, where no HMAC secret exists). | P1-04 | M | 🟡 | Unit-tested against mocked responses incl. 409/403 paths and an org-policy-pinned PAP failure. |
 | P1-07 | Optional keychain storage behind a cargo feature; size-checked. | P1-05 | S | ⚪ | Off by default if it costs more than the budget allows. |
 
-**Status.** P1-01, P1-02 and P1-03 have landed on `dashboard`: the `ccusage-objectstore` crate
-(keys, error taxonomy, `ObjectStore`, V4 signer pinned to the published `get-vanilla` vector) and
-the `MemoryStore` double in `ccusage-test-support`. P1-04 is next.
+**Status.** P1-01…P1-04 have landed on `dashboard`: the `ccusage-objectstore` crate (keys, error
+taxonomy, `ObjectStore`, V4 signer pinned to the published `get-vanilla` vector), the `MemoryStore`
+double in `ccusage-test-support`, and `GcsStore` in the binary crate — JSON API get/put/list/delete
+over the existing `ureq` seam, `ifGenerationMatch` preconditions (`0` for create-if-absent), and
+backoff on 429/5xx/network only, with 412 surfaced as `Conflict` on the first attempt so a CAS loop
+re-reads instead of overwriting. Tested against a scripted local listener. P1-05 is next; it
+replaces the `Authorizer` seam's hand-supplied bearer token with real credential resolution.
 
 ---
 
