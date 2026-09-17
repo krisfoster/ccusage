@@ -107,6 +107,8 @@ impl Status {
 
 #[cfg(test)]
 mod tests {
+    use ccusage_test_support::secrets::assert_no_secrets;
+
     use super::*;
 
     fn configured() -> SyncConfig {
@@ -148,6 +150,16 @@ mod tests {
         assert!(text.contains("gs://ccusage-9f3a1c2b4405"), "{text}");
         assert!(text.contains("my-project"), "{text}");
         assert!(text.contains("a1b2c3 (laptop)"), "{text}");
+    }
+
+    /// Status is the command users paste into issues, so it renders where the
+    /// target came from but never what authenticated to it.
+    #[test]
+    fn neither_rendering_carries_credential_material() {
+        let status = Status::from_config(Some(&configured()));
+
+        assert_no_secrets(&status.to_text(), &[]);
+        assert_no_secrets(&status.to_json().to_string(), &[]);
     }
 
     #[test]

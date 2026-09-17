@@ -1,6 +1,27 @@
 [extend]
 useDefault = true
 
+# Cloud sync credentials. The HMAC pair signs Cloud Storage requests directly and
+# the default rules do not know its shape, so a leaked pair is a writable bucket.
+[[rules]]
+id = "gcs-hmac-access-id"
+description = "Google Cloud Storage HMAC access id"
+regex = '''GOOG1[A-Z0-9]{20,}'''
+keywords = ["GOOG1"]
+
+[[rules]]
+id = "gcs-hmac-secret"
+description = "Google Cloud Storage HMAC secret"
+regex = '''(?i)(?:hmac[_-]?secret|CCUSAGE_SYNC_HMAC_SECRET)["'\s:=]{1,10}([A-Za-z0-9+/]{40})'''
+keywords = ["hmac_secret", "hmac-secret", "CCUSAGE_SYNC_HMAC_SECRET"]
+secretGroup = 1
+
+[[rules]]
+id = "google-oauth-access-token"
+description = "Google OAuth access token"
+regex = '''ya29\.[A-Za-z0-9._\-]{20,}'''
+keywords = ["ya29."]
+
 [allowlist]
 description = "Global allowlist"
 paths = ['''pnpm-lock\.yaml$''']

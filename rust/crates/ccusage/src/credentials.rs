@@ -645,6 +645,7 @@ mod tests {
     use ccusage_cli::SyncAuthMode;
     use ccusage_objectstore::ObjectStoreError;
     use ccusage_test_support::http_server::{ScriptedServer, json_response as json};
+    use ccusage_test_support::secrets::{assert_debug_redacted, assert_no_secrets};
     use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -994,7 +995,18 @@ mod tests {
         let rendered = format!("{credentials:?}");
 
         assert!(rendered.contains("RefreshToken(<redacted>)"), "{rendered}");
-        assert!(!rendered.contains("1//refresh"), "{rendered}");
-        assert!(!rendered.contains("shhh"), "{rendered}");
+        assert_no_secrets(&rendered, &["1//refresh", "shhh"]);
+    }
+
+    #[test]
+    fn an_hmac_credential_keeps_its_secret_out_of_debug_output() {
+        let credentials = resolver(&[
+            ("CCUSAGE_SYNC_HMAC_ACCESS_ID", "GOOG1EXAMPLE"),
+            ("CCUSAGE_SYNC_HMAC_SECRET", "correct-horse-battery"),
+        ])
+        .resolve()
+        .expect("resolve");
+
+        assert_debug_redacted(&credentials, &["correct-horse-battery"]);
     }
 }

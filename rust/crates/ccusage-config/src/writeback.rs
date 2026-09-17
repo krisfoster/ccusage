@@ -116,6 +116,7 @@ fn write_document(path: &Path, document: &Map<String, Value>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use ccusage_test_support::fs_fixture;
+    use ccusage_test_support::secrets::assert_no_secrets;
 
     use super::*;
 
@@ -225,6 +226,45 @@ mod tests {
         .expect("persist");
 
         assert!(!fixture.path("ccusage.json.tmp").exists());
+    }
+
+    /// Setup holds live credentials while it runs; the file it writes is
+    /// world-readable by the user's other tools and often committed by accident,
+    /// so the set of keys it may contain is an allowlist rather than a habit.
+    #[test]
+    fn the_written_config_can_only_contain_non_secret_settings() {
+        let fixture = fs_fixture!({});
+        let path = fixture.path("ccusage.json");
+
+        persist_sync(
+            &path,
+            &SyncWriteback {
+                provider: Some("gcs".to_string()),
+                project_id: Some("my-project".to_string()),
+                bucket: Some("ccusage-9f3a1c2b".to_string()),
+                location: Some("US".to_string()),
+                prefix: Some("ccusage/v1".to_string()),
+                machine_id: Some("a1b2c3".to_string()),
+                user_id: Some("u-1234".to_string()),
+            },
+        )
+        .expect("persist");
+
+        let contents = fs::read_to_string(&path).expect("read");
+        assert_no_secrets(&contents, &[]);
+        let written = read(&path);
+        let allowed = [
+            "provider",
+            "projectId",
+            "bucket",
+            "location",
+            "prefix",
+            "machineId",
+            "userId",
+        ];
+        for key in written["sync"].as_object().expect("sync block").keys() {
+            assert!(allowed.contains(&key.as_str()), "setup wrote '{key}'");
+        }
     }
 
     #[test]

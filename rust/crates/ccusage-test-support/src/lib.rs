@@ -12,6 +12,7 @@ use assert_fs::{
 
 pub mod http_server;
 pub mod objectstore;
+pub mod secrets;
 pub mod zcode;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
