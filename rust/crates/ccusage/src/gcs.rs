@@ -497,125 +497,19 @@ impl ObjectStore for GcsStore {
 mod tests {
     use super::{Anonymous, BearerToken, GcsStore, RetryPolicy, parse_rfc3339_ms};
     use ccusage_objectstore::{KeySpace, ObjectStore, ObjectStoreError, Precondition};
-    use std::{
-        io::{self, Read as _, Write as _},
-        net::{TcpListener, TcpStream},
-        sync::{Arc, Mutex},
-        thread,
-        time::{Duration, Instant},
-    };
+    use ccusage_test_support::http_server::{ScriptedServer, json_response as json, response};
+    use std::time::Duration;
 
-    /// Serves one scripted response per request and records what it was asked
-    /// for, so a test can assert on the query string a precondition produced.
-    struct FakeGcs {
-        endpoint: String,
-        requests: Arc<Mutex<Vec<String>>>,
-        handle: Option<thread::JoinHandle<()>>,
-    }
-
-    impl FakeGcs {
-        fn serving(responses: Vec<String>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake gcs");
-            listener.set_nonblocking(true).expect("nonblocking");
-            let endpoint = format!(
-                "http://{}",
-                listener.local_addr().expect("fake gcs address")
-            );
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let recorded = Arc::clone(&requests);
-            let handle = thread::spawn(move || {
-                for response in responses {
-                    let Ok(mut stream) = accept(&listener) else {
-                        break;
-                    };
-                    match read_request(&mut stream) {
-                        Ok(request) => recorded.lock().expect("requests").push(request),
-                        Err(_) => break,
-                    }
-                    let _ = stream.write_all(response.as_bytes());
-                }
-            });
-            Self {
-                endpoint,
-                requests,
-                handle: Some(handle),
-            }
-        }
-
-        fn store(&self, retry: RetryPolicy) -> GcsStore {
-            GcsStore::with_endpoint(
-                &self.endpoint,
-                "usage-bucket",
-                Box::new(BearerToken::new("test-token")),
-                retry,
-            )
-        }
-
-        fn requests(&mut self) -> Vec<String> {
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-            self.requests.lock().expect("requests").clone()
-        }
-    }
-
-    fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(false)?;
-                    return Ok(stream);
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "no request"));
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn read_request(stream: &mut TcpStream) -> io::Result<String> {
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let mut request = Vec::new();
-        let mut byte = [0u8; 1];
-        while !request.ends_with(b"\r\n\r\n") {
-            if stream.read(&mut byte)? == 0 {
-                break;
-            }
-            request.push(byte[0]);
-        }
-        // Read a declared body so the client is not left blocked on a write.
-        let head = String::from_utf8_lossy(&request).into_owned();
-        if let Some(length) = content_length(&head) {
-            let mut body = vec![0u8; length];
-            stream.read_exact(&mut body)?;
-            return Ok(format!("{head}{}", String::from_utf8_lossy(&body)));
-        }
-        Ok(head)
-    }
-
-    fn content_length(head: &str) -> Option<usize> {
-        head.lines()
-            .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
-            .and_then(|line| line.split_once(':'))
-            .and_then(|(_, value)| value.trim().parse().ok())
-    }
-
-    fn response(status: u16, reason: &str, headers: &str, body: &str) -> String {
-        format!(
-            "HTTP/1.1 {status} {reason}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
+    fn store_for(server: &ScriptedServer) -> GcsStore {
+        GcsStore::with_endpoint(
+            server.endpoint(),
+            "usage-bucket",
+            Box::new(BearerToken::new("test-token")),
+            no_retry(),
         )
     }
 
-    fn json(status: u16, body: &str) -> String {
-        response(status, "OK", "content-type: application/json\r\n", body)
-    }
-
+    /// Retries still happen; only the sleeping between them is removed.
     fn no_retry() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 4,
@@ -632,13 +526,13 @@ mod tests {
 
     #[test]
     fn get_returns_the_body_and_the_generation_the_server_reported() {
-        let mut fake = FakeGcs::serving(vec![response(
+        let mut fake = ScriptedServer::serving(vec![response(
             200,
             "OK",
             "x-goog-generation: 1712345678\r\netag: \"CAE=\"\r\n",
             "{\"hello\":1}",
         )]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         let (body, meta) = store
             .get(&keys().manifest())
@@ -661,16 +555,17 @@ mod tests {
 
     #[test]
     fn a_missing_object_is_absence_rather_than_an_error() {
-        let fake = FakeGcs::serving(vec![json(404, r#"{"error":{"message":"No such object"}}"#)]);
-        let store = fake.store(no_retry());
+        let fake =
+            ScriptedServer::serving(vec![json(404, r#"{"error":{"message":"No such object"}}"#)]);
+        let store = store_for(&fake);
 
         assert!(store.get(&keys().manifest()).expect("get").is_none());
     }
 
     #[test]
     fn put_sends_the_create_if_absent_precondition_as_generation_zero() {
-        let mut fake = FakeGcs::serving(vec![json(200, OBJECT_RESOURCE)]);
-        let store = fake.store(no_retry());
+        let mut fake = ScriptedServer::serving(vec![json(200, OBJECT_RESOURCE)]);
+        let store = store_for(&fake);
 
         let meta = store
             .put(
@@ -694,8 +589,8 @@ mod tests {
 
     #[test]
     fn put_sends_the_expected_generation_for_a_compare_and_swap() {
-        let mut fake = FakeGcs::serving(vec![json(200, OBJECT_RESOURCE)]);
-        let store = fake.store(no_retry());
+        let mut fake = ScriptedServer::serving(vec![json(200, OBJECT_RESOURCE)]);
+        let store = store_for(&fake);
 
         store
             .put(
@@ -715,11 +610,11 @@ mod tests {
 
     #[test]
     fn a_failed_precondition_is_a_conflict_and_is_never_retried() {
-        let mut fake = FakeGcs::serving(vec![
+        let mut fake = ScriptedServer::serving(vec![
             json(412, r#"{"error":{"message":"Precondition Failed"}}"#),
             json(200, OBJECT_RESOURCE),
         ]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         let error = store
             .put(
@@ -740,12 +635,12 @@ mod tests {
 
     #[test]
     fn a_throttled_write_is_retried_until_it_succeeds() {
-        let mut fake = FakeGcs::serving(vec![
+        let mut fake = ScriptedServer::serving(vec![
             json(429, r#"{"error":{"message":"slow down"}}"#),
             json(503, r#"{"error":{"message":"backend"}}"#),
             json(200, OBJECT_RESOURCE),
         ]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         store
             .put(
@@ -761,8 +656,8 @@ mod tests {
 
     #[test]
     fn retries_stop_at_the_attempt_limit() {
-        let mut fake = FakeGcs::serving(vec![json(503, "{}"); 4]);
-        let store = fake.store(no_retry());
+        let mut fake = ScriptedServer::serving(vec![json(503, "{}"); 4]);
+        let store = store_for(&fake);
 
         let error = store
             .get(&keys().manifest())
@@ -777,11 +672,11 @@ mod tests {
 
     #[test]
     fn a_403_names_the_object_and_keeps_the_server_message() {
-        let fake = FakeGcs::serving(vec![json(
+        let fake = ScriptedServer::serving(vec![json(
             403,
             r#"{"error":{"message":"does not have storage.objects.get access"}}"#,
         )]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         let error = store.get(&keys().manifest()).expect_err("403 must surface");
 
@@ -796,7 +691,7 @@ mod tests {
 
     #[test]
     fn list_follows_page_tokens() {
-        let mut fake = FakeGcs::serving(vec![
+        let mut fake = ScriptedServer::serving(vec![
             json(
                 200,
                 r#"{"items":[{"name":"ccusage/a.json","generation":"1","size":"3"}],"nextPageToken":"page-2"}"#,
@@ -806,7 +701,7 @@ mod tests {
                 r#"{"items":[{"name":"ccusage/b.json","generation":"2","size":"4"}]}"#,
             ),
         ]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         let objects = store.list("ccusage/").expect("list");
 
@@ -824,11 +719,11 @@ mod tests {
 
     #[test]
     fn delete_is_idempotent_and_can_be_conditional() {
-        let mut fake = FakeGcs::serving(vec![
+        let mut fake = ScriptedServer::serving(vec![
             response(204, "No Content", "", ""),
             json(404, r#"{"error":{"message":"No such object"}}"#),
         ]);
-        let store = fake.store(no_retry());
+        let store = store_for(&fake);
 
         store
             .delete(
@@ -855,24 +750,23 @@ mod tests {
 
     #[test]
     fn an_anonymous_store_sends_no_authorization_header() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
-        let server = thread::spawn(move || {
-            let mut stream = accept(&listener).expect("request");
-            let request = read_request(&mut stream).expect("read");
-            let _ = stream.write_all(response(200, "OK", "", "asset").as_bytes());
-            request
-        });
-        let store =
-            GcsStore::with_endpoint(&endpoint, "usage-bucket", Box::new(Anonymous), no_retry());
+        let mut fake = ScriptedServer::serving(vec![response(200, "OK", "", "asset")]);
+        let store = GcsStore::with_endpoint(
+            fake.endpoint(),
+            "usage-bucket",
+            Box::new(Anonymous),
+            no_retry(),
+        );
 
         store
             .get(&keys().dashboard_asset("index.html").expect("asset key"))
             .expect("public read");
 
-        let request = server.join().expect("server");
-        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        assert!(
+            !fake.requests()[0]
+                .to_ascii_lowercase()
+                .contains("authorization:")
+        );
     }
 
     #[test]

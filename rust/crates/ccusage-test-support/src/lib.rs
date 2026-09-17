@@ -10,6 +10,7 @@ use assert_fs::{
     fixture::{ChildPath, FileWriteStr, PathChild, PathCreateDir},
 };
 
+pub mod http_server;
 pub mod objectstore;
 pub mod zcode;
 
