@@ -129,6 +129,7 @@ name = "ccusage"
 version = "0.0.0"
 dependencies = [
  "assert_fs",
+ "base64",
  "ccusage-adapter-all",
  "ccusage-adapter-amp",
  "ccusage-adapter-antigravity",

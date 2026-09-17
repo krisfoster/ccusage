@@ -21,6 +21,8 @@ use std::{
 
 use ccusage_objectstore::{Key, ObjectMeta, ObjectStore, ObjectStoreError, Precondition, Result};
 
+pub(crate) mod bucket;
+
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const MAX_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
@@ -119,26 +121,20 @@ fn jitter_fraction() -> f64 {
     f64::from(u32::try_from(nanos % 1_000).unwrap_or(0)) / 1_000.0
 }
 
-pub(crate) struct GcsStore {
+/// The request plumbing shared by the object store and the bucket admin calls:
+/// an agent, an endpoint, the credential seam and the retry policy. Splitting
+/// it out keeps `ObjectStore` to the four verbs it is defined by, while bucket
+/// creation and IAM — which belong to setup, not to the data path — reuse the
+/// same authorization, status mapping and backoff.
+pub(crate) struct JsonApi {
     agent: ureq::Agent,
     endpoint: String,
-    bucket: String,
     authorizer: Box<dyn Authorizer>,
     retry: RetryPolicy,
 }
 
-impl GcsStore {
-    /// The production constructor. `sync setup` (P2) is its first caller.
-    pub(crate) fn new(bucket: &str, authorizer: Box<dyn Authorizer>) -> Self {
-        Self::with_endpoint(DEFAULT_ENDPOINT, bucket, authorizer, RetryPolicy::default())
-    }
-
-    pub(crate) fn with_endpoint(
-        endpoint: &str,
-        bucket: &str,
-        authorizer: Box<dyn Authorizer>,
-        retry: RetryPolicy,
-    ) -> Self {
+impl JsonApi {
+    pub(crate) fn new(endpoint: &str, authorizer: Box<dyn Authorizer>, retry: RetryPolicy) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(REQUEST_TIMEOUT_SECONDS)))
             // Statuses are mapped onto the error taxonomy here, and 404 and 412
@@ -149,19 +145,13 @@ impl GcsStore {
         Self {
             agent,
             endpoint: endpoint.trim_end_matches('/').to_string(),
-            bucket: bucket.to_string(),
             authorizer,
             retry,
         }
     }
 
-    fn object_url(&self, key: &str, suffix: &str) -> String {
-        format!(
-            "{}/storage/v1/b/{}/o/{}{suffix}",
-            self.endpoint,
-            encode(&self.bucket),
-            encode(key),
-        )
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     /// Runs `attempt` until it succeeds, fails non-retryably, or runs out of
@@ -187,7 +177,7 @@ impl GcsStore {
         }
     }
 
-    fn get_like(
+    fn send_without_body(
         &self,
         request: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
     ) -> Result<Response> {
@@ -198,7 +188,7 @@ impl GcsStore {
         finish(request.call())
     }
 
-    fn post_body(
+    fn send_with_body(
         &self,
         request: ureq::RequestBuilder<ureq::typestate::WithBody>,
         body: &[u8],
@@ -211,6 +201,39 @@ impl GcsStore {
             request = request.header("authorization", &authorization);
         }
         finish(request.send(body))
+    }
+}
+
+pub(crate) struct GcsStore {
+    api: JsonApi,
+    bucket: String,
+}
+
+impl GcsStore {
+    /// The production constructor. `sync setup` (P2) is its first caller.
+    pub(crate) fn new(bucket: &str, authorizer: Box<dyn Authorizer>) -> Self {
+        Self::with_endpoint(DEFAULT_ENDPOINT, bucket, authorizer, RetryPolicy::default())
+    }
+
+    pub(crate) fn with_endpoint(
+        endpoint: &str,
+        bucket: &str,
+        authorizer: Box<dyn Authorizer>,
+        retry: RetryPolicy,
+    ) -> Self {
+        Self {
+            api: JsonApi::new(endpoint, authorizer, retry),
+            bucket: bucket.to_string(),
+        }
+    }
+
+    fn object_url(&self, key: &str, suffix: &str) -> String {
+        format!(
+            "{}/storage/v1/b/{}/o/{}{suffix}",
+            self.api.endpoint(),
+            encode(&self.bucket),
+            encode(key),
+        )
     }
 }
 
@@ -393,8 +416,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 impl ObjectStore for GcsStore {
     fn get(&self, key: &Key) -> Result<Option<(Vec<u8>, ObjectMeta)>> {
         let url = self.object_url(key.path(), "?alt=media");
-        self.with_retry(|| {
-            let response = self.get_like(self.agent.get(&url))?;
+        self.api.with_retry(|| {
+            let response = self.api.send_without_body(self.api.agent.get(&url))?;
             if response.status == 404 {
                 return Ok(None);
             }
@@ -426,11 +449,13 @@ impl ObjectStore for GcsStore {
         }
         let url = format!(
             "{}/upload/storage/v1/b/{}/o?{query}",
-            self.endpoint,
+            self.api.endpoint(),
             encode(&self.bucket),
         );
-        self.with_retry(|| {
-            let response = self.post_body(self.agent.post(&url), body, content_type)?;
+        self.api.with_retry(|| {
+            let response =
+                self.api
+                    .send_with_body(self.api.agent.post(&url), body, content_type)?;
             if let Some(error) = status_error(&response, key.path()) {
                 return Err(error);
             }
@@ -448,11 +473,11 @@ impl ObjectStore for GcsStore {
             }
             let url = format!(
                 "{}/storage/v1/b/{}/o?{query}",
-                self.endpoint,
+                self.api.endpoint(),
                 encode(&self.bucket),
             );
-            let page = self.with_retry(|| {
-                let response = self.get_like(self.agent.get(&url))?;
+            let page = self.api.with_retry(|| {
+                let response = self.api.send_without_body(self.api.agent.get(&url))?;
                 if let Some(error) = status_error(&response, prefix) {
                     return Err(error);
                 }
@@ -480,8 +505,8 @@ impl ObjectStore for GcsStore {
             .map(|condition| format!("?{condition}"))
             .unwrap_or_default();
         let url = self.object_url(key.path(), &suffix);
-        self.with_retry(|| {
-            let response = self.get_like(self.agent.delete(&url))?;
+        self.api.with_retry(|| {
+            let response = self.api.send_without_body(self.api.agent.delete(&url))?;
             if response.status == 404 {
                 return Ok(());
             }

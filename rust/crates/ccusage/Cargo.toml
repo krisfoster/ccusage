@@ -15,6 +15,7 @@ path = "src/main.rs"
 fetch-litellm-pricing = ["ccusage-core/fetch-litellm-pricing"]
 
 [dependencies]
+base64.workspace = true
 ccusage-adapter-all.workspace = true
 ccusage-adapter-amp.workspace = true
 ccusage-adapter-antigravity.workspace = true

@@ -13,11 +13,16 @@ source in its own `ccusage-adapter-*` crate.
   `blocks` and `statusline`.
 - `adapter/` — the thin aliases that map each `ccusage <agent>` subcommand to its
   adapter crate.
+- `http.rs`, `gcs.rs`, `gcs/bucket.rs`, `credentials.rs` — everything that needs
+  `ureq` and a TLS stack: pricing fetches, the GCS object store, bucket setup,
+  and Google credential resolution. They live here so no crate below the binary
+  gains a network dependency.
 - `bin/generate_config_schema.rs` — writes `apps/ccusage/config-schema.json`; the
   `config-schema` flake check fails when the committed file drifts.
 
 ## Depends on
 
+- `base64`
 - `ccusage-adapter-all`
 - `ccusage-adapter-amp`
 - `ccusage-adapter-claude`
