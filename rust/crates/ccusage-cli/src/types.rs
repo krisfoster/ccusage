@@ -70,6 +70,9 @@ impl SyncCommand {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SyncRunArgs {
     pub dry_run: bool,
+    /// Days of history to keep. `None` keeps everything: deletion is never
+    /// implicit, so retention only applies when the user asks for it.
+    pub prune: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

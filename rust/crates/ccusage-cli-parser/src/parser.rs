@@ -365,6 +365,17 @@ fn parse_command(
     }
 }
 
+/// Retention in whole days. Zero would mean "delete everything, including
+/// today", which is a thing to ask for deliberately rather than by typo.
+fn parse_prune_days(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(days) if days > 0 => Ok(days),
+        _ => Err(format!(
+            "--prune takes a number of days to keep, such as --prune 365; got '{value}'"
+        )),
+    }
+}
+
 /// The whole `sync` grammar, including the subcommands whose behavior arrives in a
 /// later release: parsing them here keeps the help text and the "not available yet"
 /// message in one place instead of turning a documented command into a parse error.
@@ -378,13 +389,22 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
     let command = match subcommand.as_str() {
         "run" => {
             let mut args = SyncRunArgs::default();
-            parse_sync_options(parser, "run", &mut json, &mut config_path, |flag, _| {
-                match flag {
-                    "--dry-run" => args.dry_run = true,
-                    _ => return Ok(false),
-                }
-                Ok(true)
-            })?;
+            parse_sync_options(
+                parser,
+                "run",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--dry-run" => args.dry_run = true,
+                        "--prune" => {
+                            args.prune = Some(parse_prune_days(&parser.value_for("--prune")?)?)
+                        }
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
             SyncCommand::Run(args)
         }
         "setup" => {

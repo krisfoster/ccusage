@@ -22,6 +22,8 @@ use crate::{
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
+const DAY_MS: i64 = 86_400_000;
+
 /// One shard as the bucket holds it, found by listing rather than by index.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct FoundShard {
@@ -337,6 +339,99 @@ pub(crate) fn merge_machine(
     // Reuses forget so the old machine leaves the roster, the bucket and the
     // rollups by exactly one code path.
     forget(store, keys, user_id, from, now)?;
+    Ok(summary)
+}
+
+/// What retention removed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PruneSummary {
+    pub deleted: Vec<String>,
+    pub oldest_kept: Option<String>,
+    pub dry_run: bool,
+}
+
+impl PruneSummary {
+    pub fn to_text(&self) -> String {
+        if self.deleted.is_empty() {
+            return "Nothing to prune; no day is older than the retention window.".to_string();
+        }
+        let verb = if self.dry_run {
+            "Would delete"
+        } else {
+            "Deleted"
+        };
+        format!(
+            "{verb} {} day(s) beyond the retention window, oldest kept {}.",
+            self.deleted.len(),
+            self.oldest_kept.as_deref().unwrap_or("none")
+        )
+    }
+}
+
+/// Deletes shards for days older than `keep_days`, across every machine.
+///
+/// Index entries go with the objects, so the next rollup pass drops the pruned
+/// days from the totals as well: the rollup is a statement about shards that
+/// exist, and leaving a day in it that nothing backs would make the dashboard
+/// charge for usage the bucket can no longer show. Retention therefore shortens
+/// the history, which is why nothing prunes unless it is asked to.
+pub(crate) fn prune(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    keep_days: u32,
+    now_ms: i64,
+    dry_run: bool,
+) -> Result<PruneSummary> {
+    let cutoff_ms = now_ms - i64::from(keep_days) * DAY_MS;
+    let cutoff = crate::format_rfc3339_millis(ccusage_core::TimestampMs::from_millis(cutoff_ms))
+        .split('T')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let found = discover(store, keys, user_id)?;
+    let mut summary = PruneSummary {
+        dry_run,
+        ..PruneSummary::default()
+    };
+    let mut by_machine: BTreeMap<&str, Vec<&FoundShard>> = BTreeMap::new();
+    for shard in &found {
+        if shard.utc_date < cutoff {
+            by_machine
+                .entry(shard.machine_id.as_str())
+                .or_default()
+                .push(shard);
+            summary.deleted.push(format!(
+                "{}/{}/{}",
+                shard.machine_id, shard.agent, shard.utc_date
+            ));
+        } else {
+            summary.oldest_kept = match summary.oldest_kept.take() {
+                Some(kept) if kept <= shard.utc_date => Some(kept),
+                _ => Some(shard.utc_date.clone()),
+            };
+        }
+    }
+    if dry_run || summary.deleted.is_empty() {
+        return Ok(summary);
+    }
+
+    for (machine_id, shards) in by_machine {
+        for shard in &shards {
+            let key = shard_key(keys, user_id, machine_id, &shard.agent, &shard.utc_date)?;
+            match store.delete(&key, &Precondition::None) {
+                Ok(()) | Err(ObjectStoreError::NotFound { .. }) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        // The index entries go with the objects, or the next rollup pass reads
+        // a shard that is not there and reports it as a failure every run.
+        machine::update_index(store, keys, user_id, machine_id, |index| {
+            for shard in &shards {
+                index.shards.remove(&shard.day_key());
+            }
+        })?;
+    }
     Ok(summary)
 }
 
@@ -844,6 +939,60 @@ mod tests {
 
         assert!(error.contains("claude/2026-09-17"), "{error}");
         assert_eq!(discover(&store, &keys, USER).expect("discover").len(), 2);
+    }
+
+    #[test]
+    fn pruning_deletes_days_beyond_the_window_and_keeps_the_rest() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        publish(&store, &keys, &shard("aaaa", "2026-08-01", 70));
+        publish(&store, &keys, &shard("bbbb", "2026-06-01", 30));
+        rollups::refresh(&store, &keys, USER, NOW).expect("rollup");
+
+        let summary = prune(&store, &keys, USER, 30, NOW_MS, false).expect("prune");
+        rollups::refresh(&store, &keys, USER, NOW).expect("rollup");
+
+        assert_eq!(
+            summary.deleted,
+            vec![
+                "aaaa/claude/2026-08-01".to_string(),
+                "bbbb/claude/2026-06-01".to_string()
+            ]
+        );
+        assert_eq!(summary.oldest_kept.as_deref(), Some("2026-09-17"));
+        assert_eq!(daily(&store, &keys).totals().input_tokens, 100);
+        // The machines themselves survive; only their old days are gone.
+        assert_eq!(
+            bootstrap::manifest_machines(&store, &keys).expect("roster"),
+            vec!["aaaa".to_string(), "bbbb".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_dry_run_prune_reports_the_same_days_and_deletes_nothing() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-08-01", 70));
+
+        let summary = prune(&store, &keys, USER, 30, NOW_MS, true).expect("prune");
+
+        assert_eq!(summary.deleted.len(), 1);
+        assert!(summary.to_text().starts_with("Would delete"));
+        assert_eq!(discover(&store, &keys, USER).expect("discover").len(), 1);
+    }
+
+    #[test]
+    fn pruning_a_bucket_inside_the_window_changes_nothing() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+
+        let summary = prune(&store, &keys, USER, 365, NOW_MS, false).expect("prune");
+
+        assert!(summary.deleted.is_empty());
+        assert!(summary.to_text().contains("Nothing to prune"));
+        assert_eq!(discover(&store, &keys, USER).expect("discover").len(), 1);
     }
 
     #[test]

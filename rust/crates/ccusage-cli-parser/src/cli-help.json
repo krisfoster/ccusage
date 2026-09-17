@@ -441,6 +441,11 @@
 			"flags": "--dry-run",
 			"description": "Report what would be uploaded without writing to the bucket",
 			"default": "false"
+		},
+		{
+			"flags": "--prune <days>",
+			"description": "Delete uploaded days older than this many days",
+			"default": "keep everything"
 		}
 	],
 	"sync_setup_options": [

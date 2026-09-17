@@ -17,7 +17,7 @@ use crate::{
     Result,
     cli::{SharedArgs, SyncRunArgs},
     cli_error, format_rfc3339_millis, load_entries,
-    sync::rollups,
+    sync::{maintenance, rollups},
 };
 
 /// The agent this build syncs. Shards are keyed by agent, so adding another is
@@ -222,6 +222,11 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     let plan = plan_uploads(shards, &index, AGENT);
 
     let summary = if args.dry_run {
+        if let Some(keep_days) = args.prune {
+            let pruned = maintenance::prune(&store, &keys, &user_id, keep_days, now_ms(), true)
+                .map_err(cli_error)?;
+            println!("{}", pruned.to_text());
+        }
         RunSummary {
             uploaded: plan
                 .uploads
@@ -247,6 +252,13 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             record.last_sync_at = Some(now.clone());
         })
         .map_err(cli_error)?;
+        // Before the rollups, so one pass both removes the old days and
+        // rewrites the totals that mentioned them.
+        if let Some(keep_days) = args.prune {
+            let pruned = maintenance::prune(&store, &keys, &user_id, keep_days, now_ms(), false)
+                .map_err(cli_error)?;
+            println!("{}", pruned.to_text());
+        }
         // Always, not only when this machine uploaded: another machine may have
         // uploaded since the last pass, and the rollups are what the dashboard
         // reads.

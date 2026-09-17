@@ -1688,7 +1688,10 @@ fn bare_sync_runs_a_sync() {
 
     assert_eq!(
         args.command,
-        SyncCommand::Run(SyncRunArgs { dry_run: false })
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: false,
+            prune: None
+        })
     );
     assert!(!args.json);
 }
@@ -1699,7 +1702,37 @@ fn sync_run_accepts_dry_run_without_naming_the_subcommand() {
 
     assert_eq!(
         args.command,
-        SyncCommand::Run(SyncRunArgs { dry_run: true })
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: true,
+            prune: None
+        })
+    );
+}
+
+#[test]
+fn sync_run_takes_a_retention_window_in_days() {
+    let args = sync_args(&["ccusage", "sync", "run", "--prune", "365"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: false,
+            prune: Some(365)
+        })
+    );
+}
+
+/// Retention deletes data, so a window that cannot be meant literally is a
+/// parse error rather than a rounding decision.
+#[test]
+fn a_retention_window_that_is_not_a_positive_number_of_days_is_rejected() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "run", "--prune", "0"]),
+        "--prune takes a number of days to keep, such as --prune 365; got '0'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "run", "--prune", "forever"]),
+        "--prune takes a number of days to keep, such as --prune 365; got 'forever'"
     );
 }
 
