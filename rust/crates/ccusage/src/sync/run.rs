@@ -20,7 +20,7 @@ use crate::{
     cli_error, format_rfc3339_millis,
     gcs::GcsStore,
     load_entries,
-    sync::{auth, status},
+    sync::{auth, rollups, status},
 };
 
 /// The agent this build syncs. Shards are keyed by agent, so adding another is
@@ -120,7 +120,7 @@ pub(crate) fn upload(
     Ok(written)
 }
 
-fn parse_date(utc_date: &str) -> std::result::Result<UtcDate, String> {
+pub(crate) fn parse_date(utc_date: &str) -> std::result::Result<UtcDate, String> {
     let mut parts = utc_date.split('-');
     let invalid = || format!("'{utc_date}' is not a YYYY-MM-DD date");
     let year = parts
@@ -212,6 +212,11 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             record.last_sync_at = Some(now.clone());
         })
         .map_err(cli_error)?;
+        // Always, not only when this machine uploaded: another machine may have
+        // uploaded since the last pass, and the rollups are what the dashboard
+        // reads.
+        let rollup = rollups::refresh(&store, &keys, &user_id, &now).map_err(cli_error)?;
+        println!("{}", rollup.to_text());
         RunSummary {
             uploaded,
             unchanged,

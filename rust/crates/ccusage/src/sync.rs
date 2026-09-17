@@ -8,6 +8,7 @@ pub(crate) mod bucket;
 pub(crate) mod doctor;
 pub(crate) mod machine;
 pub(crate) mod project;
+pub(crate) mod rollups;
 pub(crate) mod run;
 pub(crate) mod status;
 

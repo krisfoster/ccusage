@@ -59,6 +59,32 @@ pub(crate) fn manifest_user_id(store: &dyn ObjectStore, keys: &KeySpace) -> Resu
     read_field(store, &keys.manifest(), "userId")
 }
 
+/// Every machine registered in the bucket, in roster order.
+///
+/// Rollups read this rather than listing the bucket: a list is eventually
+/// consistent about prefixes it has never seen, while the roster is written
+/// with compare-and-swap, so a machine that finished registering is visible to
+/// the next sync that runs anywhere.
+pub(crate) fn manifest_machines(store: &dyn ObjectStore, keys: &KeySpace) -> Result<Vec<String>> {
+    let key = keys.manifest();
+    let Some((body, _)) = store.get(&key).map_err(|error| error.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let document: Value = serde_json::from_slice(&body)
+        .map_err(|error| format!("{} is not readable JSON: {error}", key.path()))?;
+    Ok(document
+        .get("machines")
+        .and_then(Value::as_array)
+        .map(|machines| {
+            machines
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Records the user ID for later machines. Never overwrites: the manifest is a
 /// multi-writer object and rewriting it here would clobber a concurrent setup.
 pub(crate) fn ensure_manifest(

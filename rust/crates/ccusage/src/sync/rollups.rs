@@ -1,0 +1,497 @@
+//! Rebuilding the derived views in the bucket after shards change.
+//!
+//! The expensive part of a rollup is reading shards, so this reads as few as it
+//! can: `daily.json` records the content hash every `(machine, agent, date)`
+//! was last rolled up from, and a shard whose hash in the machine index still
+//! matches is skipped entirely. A steady-state sync therefore reads one index
+//! per machine and one shard — the day that changed.
+//!
+//! `daily.json` has as many writers as the user has machines, so it is written
+//! with the generation it was read at and a lost race is re-run from the read
+//! rather than overwritten. `weekly`, `monthly` and `models` are pure functions
+//! of the daily rollup, so they are written unconditionally: the worst a lost
+//! race can do is leave them one sync behind, which the next sync corrects,
+//! whereas a compare-and-swap on four objects could leave them inconsistent
+//! with each other.
+
+use ccusage_objectstore::{Key, KeySpace, ObjectStore, ObjectStoreError, Precondition, RollupKind};
+use ccusage_sync::rollup::{Daily, ROLLUP_SCHEMA, ShardRef, derive};
+use ccusage_sync::shard::{ParsedShard, Shard};
+use serde::Serialize;
+
+use super::bootstrap;
+use super::machine;
+use super::run::parse_date;
+
+/// Bounded so a bucket under constant write pressure fails loudly rather than
+/// spinning; one concurrent sync resolves on the first retry.
+const MAX_ATTEMPTS: usize = 5;
+
+pub(crate) type Result<T> = std::result::Result<T, String>;
+
+/// What a rollup pass did, in the terms the user is told about.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RollupSummary {
+    pub machines: usize,
+    /// Shards read because their hash had changed.
+    pub rolled_up: usize,
+    /// Shards written by a newer ccusage than this one, left out of the totals.
+    pub skipped_newer: usize,
+    /// Shards an index promised that the bucket does not hold.
+    pub missing: usize,
+}
+
+impl RollupSummary {
+    pub fn to_text(&self) -> String {
+        let mut text = format!(
+            "Rolled up {} shard(s) from {} machine(s).",
+            self.rolled_up, self.machines
+        );
+        if self.skipped_newer > 0 {
+            text.push_str(&format!(
+                " {} shard(s) were written by a newer ccusage and are not counted; upgrade to include them.",
+                self.skipped_newer
+            ));
+        }
+        if self.missing > 0 {
+            text.push_str(&format!(
+                " {} shard(s) are listed by a machine but missing from the bucket; run 'ccusage sync run' on that machine.",
+                self.missing
+            ));
+        }
+        text
+    }
+}
+
+/// Recomputes every rollup from whatever the bucket now holds.
+pub(crate) fn refresh(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    now: &str,
+) -> Result<RollupSummary> {
+    for _ in 0..MAX_ATTEMPTS {
+        let (mut daily, generation) = read_daily(store, keys)?;
+        let machines = bootstrap::manifest_machines(store, keys)?;
+        let mut summary = RollupSummary {
+            machines: machines.len(),
+            ..RollupSummary::default()
+        };
+        let mut live = Vec::new();
+
+        for machine_id in &machines {
+            let index = machine::load_index(store, keys, user_id, machine_id)?;
+            for (entry_key, entry) in &index.shards {
+                let Some((agent, utc_date)) = entry_key.split_once('/') else {
+                    continue;
+                };
+                let reference = ShardRef {
+                    machine_id: machine_id.clone(),
+                    agent: agent.to_string(),
+                    utc_date: utc_date.to_string(),
+                };
+                live.push(reference.key());
+                if daily.is_current(&reference, &entry.content_hash) {
+                    continue;
+                }
+                match load_shard(store, keys, user_id, &reference)? {
+                    Some(ParsedShard::Known(shard)) => {
+                        daily.apply(&shard);
+                        summary.rolled_up += 1;
+                    }
+                    // Counting a shard this build cannot fully read would
+                    // under-report the day it covers, which is worse than
+                    // leaving it out and saying so.
+                    Some(ParsedShard::Newer { .. }) => summary.skipped_newer += 1,
+                    None => summary.missing += 1,
+                }
+            }
+        }
+
+        // A shard that left the index — forgotten machine, pruned day — must
+        // leave the totals too, or the dashboard keeps charging for it.
+        for stale in stale_refs(&daily, &live) {
+            daily.forget(&stale);
+        }
+
+        daily.schema = ROLLUP_SCHEMA;
+        daily.generated_at = now.to_string();
+
+        match put(
+            store,
+            &keys.rollup(RollupKind::Daily),
+            &daily,
+            generation.as_deref(),
+        ) {
+            Ok(()) => {}
+            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+
+        let derived = derive(&daily);
+        put_derived(store, keys, RollupKind::Weekly, &derived.weekly)?;
+        put_derived(store, keys, RollupKind::Monthly, &derived.monthly)?;
+        put_derived(store, keys, RollupKind::Models, &derived.models)?;
+        return Ok(summary);
+    }
+    Err(
+        "the bucket's rollups kept changing under this sync. Re-run 'ccusage sync run' once no other sync is running."
+            .to_string(),
+    )
+}
+
+fn stale_refs(daily: &Daily, live: &[String]) -> Vec<ShardRef> {
+    daily
+        .based_on
+        .keys()
+        .filter(|key| !live.contains(key))
+        .filter_map(|key| {
+            let mut parts = key.splitn(3, '/');
+            Some(ShardRef {
+                machine_id: parts.next()?.to_string(),
+                agent: parts.next()?.to_string(),
+                utc_date: parts.next()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn read_daily(store: &dyn ObjectStore, keys: &KeySpace) -> Result<(Daily, Option<String>)> {
+    let key = keys.rollup(RollupKind::Daily);
+    let Some((body, meta)) = store.get(&key).map_err(|error| error.to_string())? else {
+        return Ok((Daily::default(), None));
+    };
+    let daily: Daily = serde_json::from_slice(&body)
+        .map_err(|error| format!("{} is not readable: {error}", key.path()))?;
+    // A rollup written by a newer ccusage is rebuilt from the shards rather
+    // than half-read; the shards, not the rollup, are the source of truth.
+    if daily.schema > ROLLUP_SCHEMA {
+        return Ok((Daily::default(), meta.generation));
+    }
+    Ok((daily, meta.generation))
+}
+
+fn load_shard(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    reference: &ShardRef,
+) -> Result<Option<ParsedShard>> {
+    let date = parse_date(&reference.utc_date)?;
+    let key = keys
+        .shard(user_id, &reference.machine_id, &reference.agent, date)
+        .map_err(|error| error.to_string())?;
+    let Some((body, _)) = store.get(&key).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    Shard::parse(&body)
+        .map(Some)
+        .map_err(|error| format!("{} is not readable: {error}", key.path()))
+}
+
+fn put<T: Serialize>(
+    store: &dyn ObjectStore,
+    key: &Key,
+    value: &T,
+    generation: Option<&str>,
+) -> std::result::Result<(), ObjectStoreError> {
+    let body = serde_json::to_vec(value).expect("the rollup is serializable");
+    let precondition = match generation {
+        Some(generation) => Precondition::IfGenerationMatch(generation.to_string()),
+        None => Precondition::IfAbsent,
+    };
+    store
+        .put(key, &body, "application/json", &precondition)
+        .map(|_| ())
+}
+
+fn put_derived<T: Serialize>(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    kind: RollupKind,
+    value: &T,
+) -> Result<()> {
+    let body = serde_json::to_vec(value).expect("the rollup is serializable");
+    store
+        .put(
+            &keys.rollup(kind),
+            &body,
+            "application/json",
+            &Precondition::None,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use ccusage_sync::rollup::{Models, Periodic};
+    use ccusage_sync::shard::{Cell, Dedupe, SHARD_SCHEMA};
+    use ccusage_test_support::objectstore::MemoryStore;
+
+    use super::super::machine::{IndexEntry, MachineIndex};
+    use super::*;
+
+    const USER: &str = "user-1";
+    const NOW: &str = "2026-09-17T18:12:03Z";
+
+    fn keys() -> KeySpace {
+        KeySpace::new("ccusage/v1").expect("prefix")
+    }
+
+    fn shard(machine: &str, date: &str, input: u64) -> Shard {
+        let mut shard = Shard {
+            schema: SHARD_SCHEMA,
+            agent: "claude".to_string(),
+            machine_id: machine.to_string(),
+            user_id: USER.to_string(),
+            utc_date: date.to_string(),
+            generated_at: NOW.to_string(),
+            ccusage_version: "20.0.21".to_string(),
+            cost_mode: "auto".to_string(),
+            pricing_snapshot: "litellm@2026-09-16".to_string(),
+            cells: vec![Cell {
+                bucket: 4,
+                model: "claude-sonnet-4-5".to_string(),
+                input_tokens: input,
+                output_tokens: 10,
+                cost: 1.0,
+                messages: 1,
+                ..Cell::default()
+            }],
+            sessions: Vec::new(),
+            dedupe: Dedupe {
+                algo: "sha256-64/v1".to_string(),
+                salt: "salt:abcd".to_string(),
+                count: 0,
+            },
+            content_hash: None,
+        };
+        shard.finish().expect("finish");
+        shard
+    }
+
+    /// Writes a shard and the index entry that points at it, the way a run on
+    /// that machine would have left the bucket.
+    fn publish(store: &MemoryStore, keys: &KeySpace, shard: &Shard) {
+        let date = parse_date(&shard.utc_date).expect("date");
+        let key = keys
+            .shard(USER, &shard.machine_id, &shard.agent, date)
+            .expect("key");
+        store
+            .put(
+                &key,
+                &shard.to_json().expect("serialize"),
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("put shard");
+        machine::update_index(store, keys, USER, &shard.machine_id, |index| {
+            index.shards.insert(
+                MachineIndex::entry_key(&shard.agent, &shard.utc_date),
+                IndexEntry {
+                    content_hash: shard.content_hash.clone().expect("finished"),
+                    finalized: false,
+                    updated_at: NOW.to_string(),
+                },
+            );
+        })
+        .expect("index");
+        register(store, keys, &shard.machine_id);
+    }
+
+    fn register(store: &MemoryStore, keys: &KeySpace, machine_id: &str) {
+        bootstrap::ensure_manifest(store, keys, USER).expect("manifest");
+        bootstrap::register_machine(store, keys, USER, machine_id).expect("register");
+    }
+
+    fn read_daily_object(store: &MemoryStore, keys: &KeySpace) -> Daily {
+        let (body, _) = store
+            .get(&keys.rollup(RollupKind::Daily))
+            .expect("get")
+            .expect("daily exists");
+        serde_json::from_slice(&body).expect("parse")
+    }
+
+    fn read_models(store: &MemoryStore, keys: &KeySpace) -> Models {
+        let (body, _) = store
+            .get(&keys.rollup(RollupKind::Models))
+            .expect("get")
+            .expect("models exists");
+        serde_json::from_slice(&body).expect("parse")
+    }
+
+    fn read_periodic(store: &MemoryStore, keys: &KeySpace, kind: RollupKind) -> Periodic {
+        let (body, _) = store.get(&keys.rollup(kind)).expect("get").expect("exists");
+        serde_json::from_slice(&body).expect("parse")
+    }
+
+    #[test]
+    fn a_first_pass_rolls_up_every_machine_and_writes_all_four_objects() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        publish(&store, &keys, &shard("bbbb", "2026-09-17", 50));
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.rolled_up, 2);
+        assert_eq!(summary.machines, 2);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 150);
+        assert_eq!(
+            read_models(&store, &keys).models["claude-sonnet-4-5"].input_tokens,
+            150
+        );
+        assert_eq!(
+            read_periodic(&store, &keys, RollupKind::Weekly).periods[0].period,
+            "2026-W38"
+        );
+        assert_eq!(
+            read_periodic(&store, &keys, RollupKind::Monthly).periods[0].period,
+            "2026-09"
+        );
+    }
+
+    /// The whole point of `basedOn`: a second pass over an unchanged bucket
+    /// must not fetch a single shard.
+    #[test]
+    fn a_second_pass_over_unchanged_shards_reads_no_shards() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        refresh(&store, &keys, USER, NOW).expect("first");
+
+        let summary = refresh(&store, &keys, USER, "2026-09-17T19:00:00Z").expect("second");
+
+        assert_eq!(summary.rolled_up, 0);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 100);
+    }
+
+    #[test]
+    fn only_the_shard_whose_hash_changed_is_re_read() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        publish(&store, &keys, &shard("aaaa", "2026-09-18", 100));
+        refresh(&store, &keys, USER, NOW).expect("first");
+
+        publish(&store, &keys, &shard("aaaa", "2026-09-18", 250));
+        let summary = refresh(&store, &keys, USER, NOW).expect("second");
+
+        assert_eq!(summary.rolled_up, 1);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 350);
+    }
+
+    /// Reading a shard this build does not understand as if it were a known one
+    /// would silently under-report that day, so it is excluded and counted.
+    #[test]
+    fn a_shard_from_a_newer_ccusage_is_reported_rather_than_half_counted() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        let key = keys
+            .shard(
+                USER,
+                "aaaa",
+                "claude",
+                parse_date("2026-09-17").expect("date"),
+            )
+            .expect("key");
+        store
+            .put(
+                &key,
+                br#"{"schema":99,"agent":"claude","buckets":[]}"#,
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("overwrite");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.skipped_newer, 1);
+        assert_eq!(summary.rolled_up, 0);
+        assert!(summary.to_text().contains("newer ccusage"));
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 0);
+    }
+
+    /// An interrupted run can leave an index entry ahead of its shard; that is
+    /// a repair job, not a reason to abandon the other machines' rollups.
+    #[test]
+    fn a_shard_the_index_promises_but_the_bucket_lacks_is_counted_not_fatal() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        register(&store, &keys, "aaaa");
+        machine::update_index(&store, &keys, USER, "aaaa", |index| {
+            index.shards.insert(
+                MachineIndex::entry_key("claude", "2026-09-17"),
+                IndexEntry {
+                    content_hash: "sha256:missing".to_string(),
+                    finalized: false,
+                    updated_at: NOW.to_string(),
+                },
+            );
+        })
+        .expect("index");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.missing, 1);
+        assert!(summary.to_text().contains("missing from the bucket"));
+    }
+
+    /// A day removed from a machine's index has to leave the totals, or the
+    /// dashboard keeps reporting spend the user has deleted.
+    #[test]
+    fn a_day_dropped_from_the_index_is_dropped_from_the_totals() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        publish(&store, &keys, &shard("aaaa", "2026-09-18", 40));
+        refresh(&store, &keys, USER, NOW).expect("first");
+
+        machine::update_index(&store, &keys, USER, "aaaa", |index| {
+            index
+                .shards
+                .remove(&MachineIndex::entry_key("claude", "2026-09-18"));
+        })
+        .expect("index");
+        refresh(&store, &keys, USER, NOW).expect("second");
+
+        let daily = read_daily_object(&store, &keys);
+        assert_eq!(daily.totals().input_tokens, 100);
+        assert!(!daily.days.contains_key("2026-09-18"));
+        assert!(!daily.based_on.contains_key("aaaa/claude/2026-09-18"));
+    }
+
+    /// A machine that joins later contributes without the earlier machines
+    /// re-reading anything they had already rolled up.
+    #[test]
+    fn a_machine_that_joins_later_is_merged_into_the_existing_rollup() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        refresh(&store, &keys, USER, NOW).expect("first");
+
+        publish(&store, &keys, &shard("bbbb", "2026-09-17", 25));
+        let summary = refresh(&store, &keys, USER, NOW).expect("second");
+
+        assert_eq!(summary.rolled_up, 1);
+        assert_eq!(summary.machines, 2);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 125);
+    }
+
+    /// Rollups are derived data and carry no dedupe keys, project hashes or
+    /// salt — but they are still spend, so they must never land in the public
+    /// dashboard prefix.
+    #[test]
+    fn every_rollup_object_is_written_to_a_private_key() {
+        for kind in [
+            RollupKind::Daily,
+            RollupKind::Weekly,
+            RollupKind::Monthly,
+            RollupKind::Models,
+        ] {
+            assert!(!keys().rollup(kind).is_public());
+        }
+    }
+}

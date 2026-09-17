@@ -7,6 +7,7 @@
 pub mod fingerprint;
 pub mod fold;
 pub mod identity;
+pub mod rollup;
 pub mod salt;
 pub mod shard;
 
@@ -15,6 +16,9 @@ pub use fold::{FoldContext, FoldEntry, fold, utc_date_and_bucket};
 pub use identity::{
     IdentityError, IdentityInputs, IdentityOrigin, IdentityWarning, MachineId, ResolvedIdentity,
     UserId, hash_identifier, os_entropy, resolve_identity,
+};
+pub use rollup::{
+    Daily, DailyCell, Derived, Models, Period, Periodic, ROLLUP_SCHEMA, ShardRef, Totals, derive,
 };
 pub use salt::{DEDUPE_ALGORITHM, Salt, SaltError, SaltOrigin};
 pub use shard::{
