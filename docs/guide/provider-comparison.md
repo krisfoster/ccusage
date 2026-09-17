@@ -1,8 +1,8 @@
 # Provider Comparison
 
 `ccusage compare` reprices the usage you already have against other model
-providers: if the same tokens had gone to z.ai, DeepSeek, OpenAI, or Google,
-what would the bill have been?
+providers: if the same tokens had gone to z.ai, DeepSeek, OpenAI, Google, xAI,
+Mistral, or Moonshot, what would the bill have been?
 
 ```bash
 ccusage compare
@@ -71,7 +71,13 @@ pairing you disagree with cannot survive your override:
 {
 	"schema": 1,
 	"updated": "2026-09-17",
-	"providers": [{ "id": "zai", "label": "z.ai" }],
+	"providers": [
+		{
+			"id": "zai",
+			"label": "z.ai",
+			"pricingUrl": "https://docs.z.ai/guides/overview/pricing"
+		}
+	],
 	"tiers": [
 		{
 			"id": "workhorse",
@@ -84,7 +90,16 @@ pairing you disagree with cannot survive your override:
 ```
 
 A model's tier is chosen by the longest matching `matches` entry, so a specific
-pattern beats a general one.
+pattern beats a general one. `pricingUrl` is optional and used by the dashboard,
+which links each published rate back to the page the provider states it on.
+
+## On the dashboard
+
+The [dashboard](/guide/dashboard) runs the same arithmetic and shows two tables:
+what each provider would have cost against your comparable spend, and the
+published per-million rates behind those figures. Both sort by any column, and
+the rate table carries no saving columns — the prices are the evidence, and a
+saving computed from list rates invites more confidence than it has earned.
 
 ## JSON output
 

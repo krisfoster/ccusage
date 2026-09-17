@@ -245,10 +245,10 @@ function priceRows(pricing) {
 			},
 			{ sort: rates.provider || '—' },
 			{ sort: rates.tier || '—' },
-			{ sort: rates.input ?? Number.POSITIVE_INFINITY, label: perMillion(rates.input) },
-			{ sort: rates.output ?? Number.POSITIVE_INFINITY, label: perMillion(rates.output) },
-			{ sort: rates.cacheWrite ?? Number.POSITIVE_INFINITY, label: perMillion(rates.cacheWrite) },
-			{ sort: rates.cacheRead ?? Number.POSITIVE_INFINITY, label: perMillion(rates.cacheRead) },
+			{ sort: rates.input ?? null, label: perMillion(rates.input) },
+			{ sort: rates.output ?? null, label: perMillion(rates.output) },
+			{ sort: rates.cacheWrite ?? null, label: perMillion(rates.cacheWrite) },
+			{ sort: rates.cacheRead ?? null, label: perMillion(rates.cacheRead) },
 		]);
 }
 
@@ -260,7 +260,8 @@ function priceRows(pricing) {
  * Rows carry a `sort` value per column so a price sorts by its number and not
  * by the string `"$10.00" < "$9.00"`. The sort is stable — rows tied on the
  * chosen column keep the order the caller gave them — and re-clicking a column
- * reverses it.
+ * reverses it. A cell with no value sorts last whichever way the column runs,
+ * since "unpublished" is not a price and does not belong at the top.
  */
 function sortableTable(headers, rows) {
 	const state = { column: null, descending: true };
@@ -275,6 +276,10 @@ function sortableTable(headers, rows) {
 				.sort((left, right) => {
 					const a = left.row[state.column].sort;
 					const b = right.row[state.column].sort;
+					if (a == null || b == null) {
+						if (a == null && b == null) return left.index - right.index;
+						return a == null ? 1 : -1;
+					}
 					const compared =
 						typeof a === 'number' && typeof b === 'number'
 							? a - b
@@ -321,7 +326,7 @@ function sortableTable(headers, rows) {
 				el(
 					'tr',
 					{},
-					row.map((cell) => el('td', {}, cell.node ?? String(cell.label ?? cell.sort))),
+					row.map((cell) => el('td', {}, cell.node ?? String(cell.label ?? cell.sort ?? '—'))),
 				),
 			),
 		);

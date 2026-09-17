@@ -3,9 +3,12 @@
 Cloud sync copies your local usage totals into an object storage bucket you own,
 so several machines can contribute to one view of your spend.
 
-`ccusage sync setup`, `ccusage sync run`, `ccusage sync status`, and
-`ccusage sync doctor` work today. `run` uploads Claude Code usage; the other
-agents and the dashboard arrive in later releases.
+`run` uploads usage from every agent ccusage supports — Claude Code, Codex,
+Gemini, Copilot, OpenCode, and the rest — stored one shard per agent per UTC
+day. An agent whose logs cannot be read is reported at the end of the run and
+skipped; the other agents still sync.
+
+See [Dashboard](/guide/dashboard) for reading the result back.
 
 ::: warning Google Cloud Storage only
 `--provider gcs` is the only provider so far. The storage layer is
@@ -262,10 +265,13 @@ want, `forget` the other machine, and merge again.
 ## Privacy
 
 Buckets ccusage creates use uniform bucket-level access and grant nothing to
-`allUsers`. When the dashboard ships, only its assets become public; usage data
-stays private and is shared through time-limited links rather than by opening the
-bucket. Setup and `doctor` both refuse to continue against a bucket that is
+`allUsers`. Setup and `doctor` both refuse to continue against a bucket that is
 readable by the world.
+
+Publishing a dashboard does not change that: the page is uploaded to a separate
+`<your-bucket>-dashboard` bucket, and that bucket is the only one made public.
+Usage data stays in the private bucket and is shared, if at all, through
+time-limited signed links.
 
 ## See also
 
