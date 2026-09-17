@@ -173,7 +173,7 @@ pub(crate) fn ensure_private(admin: &BucketAdmin, spec: &BucketSpec) -> Result<B
 /// An unconditional `allUsers`/`allAuthenticatedUsers` binding. Conditional ones
 /// are left alone: the dashboard's own grant is conditional on the public prefix,
 /// and re-running setup must not trip over it.
-fn public_member(policy: &Value) -> Option<String> {
+pub(crate) fn public_member(policy: &Value) -> Option<String> {
     policy
         .get("bindings")
         .and_then(Value::as_array)

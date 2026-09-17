@@ -86,6 +86,12 @@ impl MemoryStore {
         Self::write(&mut state, key.path(), body, "application/json")
     }
 
+    /// The store's own clock, for tests that compare it against a caller's idea
+    /// of now — clock skew checks, for one.
+    pub fn now_ms(&self) -> i64 {
+        self.state.lock().unwrap().clock_ms
+    }
+
     pub fn contains(&self, key: &Key) -> bool {
         self.state.lock().unwrap().objects.contains_key(key.path())
     }
