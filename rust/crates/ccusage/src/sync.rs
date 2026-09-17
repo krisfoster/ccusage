@@ -37,7 +37,7 @@ use crate::{
     cli_error,
     gcs::{
         GcsStore, JsonApi, RetryPolicy,
-        bucket::{BucketAdmin, BucketSpec},
+        bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
         projects::ProjectCatalog,
     },
 };
@@ -252,8 +252,12 @@ fn setup_sync(
         ),
         &planned.name,
     );
-    let info = bucket::ensure_private(&admin, &BucketSpec::new(&project.id, location))
-        .map_err(|error| cli_error(error.to_string()))?;
+    // The data bucket never serves the dashboard — that lives in a separate
+    // bucket — so it can refuse to become public at all.
+    let mut spec = BucketSpec::new(&project.id, location);
+    spec.public_access_prevention = PublicAccessPrevention::Enforced;
+    let info =
+        bucket::ensure_private(&admin, &spec).map_err(|error| cli_error(error.to_string()))?;
     println!("Bucket gs://{} ready in {}.", info.name, info.location);
 
     let prefix = setup

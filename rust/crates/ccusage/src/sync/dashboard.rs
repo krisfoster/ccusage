@@ -6,15 +6,18 @@
 //! - **Local** (the default): a server bound to loopback reads the rollups with
 //!   this machine's own credentials and serves them alongside the bundle.
 //!   Nothing becomes public, and no token leaves the process.
-//! - **Deployed** (`--deploy`): the bundle is uploaded under the one prefix
-//!   `allUsers` can read. The rollups are *not* uploaded there — they are
-//!   already in the bucket, private — so a deployed page shows nothing until it
-//!   is opened with a `--share` link, whose signed URLs ride in the location
-//!   fragment and therefore never reach a server log.
+//! - **Deployed** (`--deploy`): the bundle is uploaded to a *second* bucket,
+//!   `<data-bucket>-dashboard`, which is world-readable and holds nothing else.
+//!   A prefix-scoped public binding inside the data bucket would be neater, but
+//!   GCS refuses an IAM condition on an `allUsers` member, so the only boundary
+//!   it will actually enforce is the bucket. The rollups stay in the private
+//!   data bucket, so a deployed page shows nothing until it is opened with a
+//!   `--share` link, whose signed URLs ride in the location fragment and
+//!   therefore never reach a server log.
 //!
-//! The public/private split is enforced by the key space, not by care taken
-//! here: `dashboard_asset` is the only constructor that yields a public key,
-//! and every rollup key is private by construction.
+//! The public/private split is enforced twice over: by the bucket, and by the
+//! key space — `dashboard_asset` is the only constructor that yields a public
+//! key, and every rollup key is private by construction.
 
 use std::{
     io::{BufRead as _, BufReader, Write as _},
@@ -41,7 +44,7 @@ use crate::{
     cli_error,
     gcs::{
         GcsStore, JsonApi, RetryPolicy,
-        bucket::{BucketAdmin, PublicAccessPrevention},
+        bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
     },
     pricing::PricingMap,
 };
@@ -81,8 +84,22 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
         std::collections::BTreeMap::new().iter(),
     ));
 
+    let assets_bucket = assets_bucket(&bucket);
+
     if args.deploy {
-        deploy(&store, &keys, &bucket, &credentials, &public)?;
+        let Some(project) = status.project_id.clone() else {
+            return Err(cli_error(
+                "sync has no project recorded. Re-run 'ccusage sync setup'.".to_string(),
+            ));
+        };
+        deploy(
+            &keys,
+            &assets_bucket,
+            &project,
+            status.location.as_deref().unwrap_or(super::DEFAULT_LOCATION),
+            &credentials,
+            &public,
+        )?;
     }
 
     let link = if args.share {
@@ -95,7 +112,13 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
                     .to_string(),
             )
         })?;
-        Some(share_link(&bucket, &keys, hmac, args.share_ttl_seconds)?)
+        Some(share_link(
+            &bucket,
+            &assets_bucket,
+            &keys,
+            hmac,
+            args.share_ttl_seconds,
+        )?)
     } else {
         None
     };
@@ -117,7 +140,7 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             Ok(())
         }
         (true, None) => {
-            let url = public_url(&bucket, &keys);
+            let url = public_url(&assets_bucket, &keys);
             println!("\nDashboard: {url}");
             println!(
                 "The page is public; the usage data is not. Run `ccusage sync dashboard --share` \
@@ -134,10 +157,33 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
 
 /* ------------------------------------------------------------------ deploy */
 
+/// The page lives in its own bucket, next to the data bucket and named after
+/// it.
+///
+/// GCS refuses an IAM condition on an `allUsers` binding, so a public *prefix*
+/// inside the data bucket is not expressible: making the shell readable would
+/// make every object readable. Splitting buckets makes the boundary the thing
+/// GCS actually enforces, and leaves the data bucket able to keep public access
+/// prevention enforced.
+fn assets_bucket(data_bucket: &str) -> String {
+    /// Cloud Storage caps a bucket name at 63 characters, so a long data bucket
+    /// loses its tail rather than producing a name the API refuses.
+    const MAX_NAME: usize = 63;
+    const SUFFIX: &str = "-dashboard";
+
+    let head_len = MAX_NAME - SUFFIX.len();
+    let head = data_bucket
+        .get(..head_len)
+        .unwrap_or(data_bucket)
+        .trim_end_matches(['-', '.', '_']);
+    format!("{head}{SUFFIX}")
+}
+
 fn deploy(
-    store: &GcsStore,
     keys: &KeySpace,
-    bucket: &str,
+    assets_bucket: &str,
+    project: &str,
+    location: &str,
     credentials: &Arc<crate::credentials::Credentials>,
     public: &[(String, Vec<u8>, &'static str)],
 ) -> Result<()> {
@@ -147,10 +193,17 @@ fn deploy(
             Box::new(Arc::clone(credentials)),
             RetryPolicy::default(),
         ),
-        bucket,
+        assets_bucket,
     );
-    // An org policy may have re-enforced prevention since setup, and the public
-    // binding below would then be refused with a bare 403.
+    let mut spec = BucketSpec::new(project, location);
+    spec.public_access_prevention = PublicAccessPrevention::Inherited;
+    admin.ensure(&spec).map_err(|error| {
+        cli_error(format!(
+            "could not create the dashboard bucket {assets_bucket}: {error}"
+        ))
+    })?;
+    // An org policy may enforce prevention on new buckets, which would refuse
+    // the public binding below with a bare 403.
     if let Ok(Some(info)) = admin.get()
         && info.public_access_prevention == Some(PublicAccessPrevention::Enforced)
     {
@@ -158,31 +211,33 @@ fn deploy(
             .set_public_access_prevention(PublicAccessPrevention::Inherited)
             .map_err(|error| {
                 cli_error(format!(
-                    "this bucket prevents public access and it could not be relaxed: {error}. \
-                         Deploying the dashboard needs public access prevention set to \
-                         'inherited'; the data stays private either way."
+                    "{assets_bucket} prevents public access and it could not be relaxed: {error}. \
+                     A published dashboard needs public access prevention set to 'inherited' on \
+                     that bucket; your usage data is in a different bucket and stays private."
                 ))
             })?;
     }
 
+    let store = GcsStore::new(assets_bucket, Box::new(Arc::clone(credentials)));
     for asset in ASSETS {
-        put_public(store, keys, asset.path, asset.bytes, asset.content_type)?;
+        put_public(&store, keys, asset.path, asset.bytes, asset.content_type)?;
     }
     for (path, bytes, content_type) in public {
-        put_public(store, keys, path, bytes, content_type)?;
+        put_public(&store, keys, path, bytes, content_type)?;
     }
 
     let granted = admin
-        .grant_public_dashboard_read(keys)
+        .grant_public_read()
         .map_err(|error| cli_error(error.to_string()))?;
     println!(
-        "Uploaded {} file(s) to {}{}",
+        "Uploaded {} file(s) to gs://{assets_bucket}/{}{}",
         ASSETS.len() + public.len(),
         keys.public_prefix(),
         if granted {
-            ", and granted public read on that prefix only."
+            ", and made that bucket world-readable. It holds the page only; your usage data is in \
+             a separate, private bucket."
         } else {
-            "; public read on that prefix was already granted."
+            "; that bucket was already world-readable."
         }
     );
     Ok(())
@@ -214,7 +269,13 @@ fn public_url(bucket: &str, keys: &KeySpace) -> String {
 /* -------------------------------------------------------------- share link */
 
 /// The rollups a viewer needs, as signed URLs carried in the fragment.
-fn share_link(bucket: &str, keys: &KeySpace, hmac: &HmacKey, ttl_seconds: u64) -> Result<String> {
+fn share_link(
+    bucket: &str,
+    assets_bucket: &str,
+    keys: &KeySpace,
+    hmac: &HmacKey,
+    ttl_seconds: u64,
+) -> Result<String> {
     let signer = Signer::new(GOOG4_HMAC_SHA256, "auto", "storage");
     let now = now_secs();
     let time =
@@ -244,7 +305,7 @@ fn share_link(bucket: &str, keys: &KeySpace, hmac: &HmacKey, ttl_seconds: u64) -
         .map_err(|error| cli_error(format!("could not build the share link: {error}")))?;
     Ok(format!(
         "{}#s={}",
-        public_url(bucket, keys),
+        public_url(assets_bucket, keys),
         base64url(&payload)
     ))
 }
@@ -556,13 +617,36 @@ mod tests {
         let keys = KeySpace::new("ccusage/v1").expect("key space");
         let hmac = HmacKey::new("GOOG1EXAMPLE", "c2VjcmV0");
 
-        let link = share_link("my-bucket", &keys, &hmac, 3600).expect("a link");
+        let link = share_link(
+            "my-bucket",
+            &assets_bucket("my-bucket"),
+            &keys,
+            &hmac,
+            3600,
+        )
+        .expect("a link");
 
         let (base, fragment) = link.split_once('#').expect("a fragment");
         assert!(!base.contains('?'), "the page URL carries no query string");
         let encoded = fragment.strip_prefix("s=").expect("the sources parameter");
         assert!(!encoded.is_empty());
         assert!(base.ends_with("/dashboard/index.html"));
+        assert!(base.contains("/my-bucket-dashboard/"), "{base}");
+    }
+
+    /// The page is world-readable and the data is not, which on GCS can only be
+    /// two buckets: a condition on an `allUsers` binding is rejected outright.
+    #[test]
+    fn the_page_is_served_from_a_different_bucket_than_the_data() {
+        let assets = assets_bucket("my-bucket");
+
+        assert_ne!(assets, "my-bucket");
+        assert!(assets.starts_with("my-bucket"), "{assets}");
+        assert!(assets.len() <= 63, "bucket names cap at 63 characters");
+
+        let long = assets_bucket(&"a".repeat(63));
+        assert_eq!(long.len(), 63, "{long}");
+        assert!(long.ends_with("-dashboard"), "{long}");
     }
 
     #[test]
