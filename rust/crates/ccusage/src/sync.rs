@@ -194,7 +194,9 @@ fn setup_sync(
         setup.bucket.as_deref(),
         configured_bucket.as_deref(),
         setup.recreate,
+        setup.non_interactive,
         &mut bucket::os_entropy,
+        &mut bucket::TerminalNamePrompt,
     )
     .map_err(|error| cli_error(error.to_string()))?;
 

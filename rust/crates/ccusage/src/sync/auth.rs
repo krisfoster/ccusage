@@ -26,6 +26,9 @@ pub(crate) trait Prompt {
 
 /// Only prompts on a real terminal: a piped stdin would otherwise read EOF and
 /// silently decline, or worse, consume data meant for something else.
+///
+/// Signing in is the expected answer — setup can do nothing without a
+/// credential — so Enter accepts and only an explicit "n" declines.
 pub(crate) struct TerminalPrompt;
 
 impl Prompt for TerminalPrompt {
@@ -34,13 +37,16 @@ impl Prompt for TerminalPrompt {
         if !std::io::stdin().is_terminal() || !stdout.is_terminal() {
             return false;
         }
-        let _ = write!(stdout, "{question} [y/N] ");
+        let _ = write!(stdout, "{question} [Y/n] ");
         let _ = stdout.flush();
         let mut answer = String::new();
         if std::io::stdin().read_line(&mut answer).is_err() {
             return false;
         }
-        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "" | "y" | "yes"
+        )
     }
 }
 
@@ -79,9 +85,10 @@ pub(crate) fn resolve_with(
     let Some(gcloud) = gcloud.filter(|_| loginable && !non_interactive) else {
         return Err(first);
     };
-    if !prompt
-        .confirm("No Google credentials found. Run `gcloud auth application-default login` now?")
-    {
+    if !prompt.confirm(
+        "No Google credentials found. Sign in to Google Cloud in your browser now (runs \
+             `gcloud auth application-default login`)?",
+    ) {
         return Err(first);
     }
     // gcloud's own output goes straight to the terminal — the user needs the

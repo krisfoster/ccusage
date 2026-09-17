@@ -62,8 +62,9 @@ Setup tries these in order and stops at the first one that works:
 6. The GCE metadata server
 
 If none are available and the terminal is interactive, setup offers to run
-`gcloud auth application-default login` for you. With `--non-interactive` it
-fails instead of asking, which is what you want in CI.
+`gcloud auth application-default login` for you and opens your browser; pressing
+Enter accepts. With `--non-interactive` it fails instead of asking, which is what
+you want in CI.
 
 `--auth adc` ignores the environment credentials, and `--auth hmac` accepts only
 an HMAC pair — use it when the machine must not authenticate as whoever last ran
@@ -76,10 +77,13 @@ The project comes from `--project`, then `CLOUDSDK_CORE_PROJECT`,
 credential can see. A single project is used automatically; several prompt you to
 choose, or, with `--non-interactive`, fail and list the IDs.
 
-Pass `--bucket` to use a bucket you already have. Otherwise ccusage creates one
-named `ccusage-<random>`. Re-running setup reuses the configured bucket; pointing
-an already configured machine at a different bucket needs `--recreate`, so a typo
-cannot quietly strand your history.
+Pass `--bucket` to use a bucket you already have. Otherwise setup asks for a
+name, suggesting `ccusage-<random>` — press Enter to take the suggestion, or type
+your own. Bucket names are globally unique across Google Cloud, so a name
+someone else already holds is rejected. With `--non-interactive` the suggested
+name is used without asking. Re-running setup reuses the configured bucket;
+pointing an already configured machine at a different bucket needs `--recreate`,
+so a typo cannot quietly strand your history.
 
 ### A second machine
 
