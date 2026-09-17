@@ -15,7 +15,7 @@
 //! with each other.
 
 use ccusage_objectstore::{Key, KeySpace, ObjectStore, ObjectStoreError, Precondition, RollupKind};
-use ccusage_sync::rollup::{Daily, ROLLUP_SCHEMA, ShardRef, derive};
+use ccusage_sync::rollup::{ANOMALY_LATE_EDIT, Anomaly, Daily, ROLLUP_SCHEMA, ShardRef, derive};
 use ccusage_sync::shard::{ParsedShard, Shard};
 use serde::Serialize;
 
@@ -39,6 +39,8 @@ pub(crate) struct RollupSummary {
     pub skipped_newer: usize,
     /// Shards an index promised that the bucket does not hold.
     pub missing: usize,
+    /// Days that changed after they had settled, across every machine.
+    pub late_edits: usize,
 }
 
 impl RollupSummary {
@@ -51,6 +53,12 @@ impl RollupSummary {
             text.push_str(&format!(
                 " {} shard(s) were written by a newer ccusage and are not counted; upgrade to include them.",
                 self.skipped_newer
+            ));
+        }
+        if self.late_edits > 0 {
+            text.push_str(&format!(
+                " {} finalized day(s) have been edited since they settled; the dashboard flags them.",
+                self.late_edits
             ));
         }
         if self.missing > 0 {
@@ -78,6 +86,7 @@ pub(crate) fn refresh(
             ..RollupSummary::default()
         };
         let mut live = Vec::new();
+        let mut anomalies = Vec::new();
 
         for machine_id in &machines {
             let index = machine::load_index(store, keys, user_id, machine_id)?;
@@ -91,6 +100,23 @@ pub(crate) fn refresh(
                     utc_date: utc_date.to_string(),
                 };
                 live.push(reference.key());
+                if entry.late_edits > 0 {
+                    summary.late_edits += 1;
+                    anomalies.push(Anomaly {
+                        kind: ANOMALY_LATE_EDIT.to_string(),
+                        machine_id: machine_id.clone(),
+                        agent: agent.to_string(),
+                        utc_date: utc_date.to_string(),
+                        detected_at: entry
+                            .last_late_edit_at
+                            .clone()
+                            .unwrap_or_else(|| entry.updated_at.clone()),
+                        detail: Some(format!(
+                            "rewritten {} time(s) after the day settled",
+                            entry.late_edits
+                        )),
+                    });
+                }
                 if daily.is_current(&reference, &entry.content_hash) {
                     continue;
                 }
@@ -116,6 +142,9 @@ pub(crate) fn refresh(
 
         daily.schema = ROLLUP_SCHEMA;
         daily.generated_at = now.to_string();
+        // Rebuilt, not appended to: an anomaly the machine indexes no longer
+        // report is one the dashboard should stop showing.
+        daily.anomalies = anomalies;
 
         match put(
             store,
@@ -293,6 +322,7 @@ mod tests {
                     content_hash: shard.content_hash.clone().expect("finished"),
                     finalized: false,
                     updated_at: NOW.to_string(),
+                    ..IndexEntry::default()
                 },
             );
         })
@@ -428,6 +458,7 @@ mod tests {
                     content_hash: "sha256:missing".to_string(),
                     finalized: false,
                     updated_at: NOW.to_string(),
+                    ..IndexEntry::default()
                 },
             );
         })
@@ -437,6 +468,66 @@ mod tests {
 
         assert_eq!(summary.missing, 1);
         assert!(summary.to_text().contains("missing from the bucket"));
+    }
+
+    /// The dashboard reads anomalies off the daily rollup, so a day a machine
+    /// rewrote after it settled has to travel from that machine's index into
+    /// `daily.json` — the reader never sees the index itself.
+    #[test]
+    fn a_late_edit_recorded_by_a_machine_reaches_the_daily_rollup() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        machine::update_index(&store, &keys, USER, "aaaa", |index| {
+            let entry = index
+                .shards
+                .get_mut(&MachineIndex::entry_key("claude", "2026-09-17"))
+                .expect("entry");
+            entry.finalized = true;
+            entry.late_edits = 2;
+            entry.last_late_edit_at = Some("2026-09-20T08:00:00Z".to_string());
+        })
+        .expect("index");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.late_edits, 1);
+        let anomalies = read_daily_object(&store, &keys).anomalies;
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].kind, ANOMALY_LATE_EDIT);
+        assert_eq!(anomalies[0].utc_date, "2026-09-17");
+        assert_eq!(anomalies[0].detected_at, "2026-09-20T08:00:00Z");
+    }
+
+    /// A machine whose late edit has been cleared should stop being flagged,
+    /// so anomalies are rebuilt each pass rather than accumulated.
+    #[test]
+    fn an_anomaly_that_no_longer_exists_is_dropped_on_the_next_pass() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        machine::update_index(&store, &keys, USER, "aaaa", |index| {
+            index
+                .shards
+                .get_mut(&MachineIndex::entry_key("claude", "2026-09-17"))
+                .expect("entry")
+                .late_edits = 1;
+        })
+        .expect("index");
+        refresh(&store, &keys, USER, NOW).expect("first");
+        machine::update_index(&store, &keys, USER, "aaaa", |index| {
+            index
+                .shards
+                .get_mut(&MachineIndex::entry_key("claude", "2026-09-17"))
+                .expect("entry")
+                .late_edits = 0;
+        })
+        .expect("index");
+
+        let summary = refresh(&store, &keys, USER, "2026-09-17T20:00:00Z").expect("second");
+
+        assert_eq!(summary.late_edits, 0);
+        assert!(read_daily_object(&store, &keys).anomalies.is_empty());
     }
 
     /// A day removed from a machine's index has to leave the totals, or the

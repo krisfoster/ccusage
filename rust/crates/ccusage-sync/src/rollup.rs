@@ -27,6 +27,28 @@ use crate::shard::Shard;
 /// rollup. The dashboard checks this before trusting the file.
 pub const ROLLUP_SCHEMA: u32 = 1;
 
+/// A shard was rewritten after its day had settled, so a total the dashboard
+/// showed before may have changed underneath a reader.
+pub const ANOMALY_LATE_EDIT: &str = "lateEdit";
+
+/// Something the totals cannot express on their own: a day that changed after
+/// it settled, usage two machines both reported, a price that was missing.
+///
+/// Carried on the daily rollup because that is the object the dashboard's
+/// anomalies strip reads, and rebuilt on every rollup pass from the machine
+/// indexes rather than accumulated, so a resolved anomaly disappears.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Anomaly {
+    pub kind: String,
+    pub machine_id: String,
+    pub agent: String,
+    pub utc_date: String,
+    pub detected_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Which shard a set of cells came from.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ShardRef {
@@ -145,6 +167,8 @@ pub struct Daily {
     /// UTC date → the cells recorded on it.
     #[serde(default)]
     pub days: BTreeMap<String, Vec<DailyCell>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anomalies: Vec<Anomaly>,
 }
 
 impl Default for Daily {
@@ -154,6 +178,7 @@ impl Default for Daily {
             generated_at: String::new(),
             based_on: BTreeMap::new(),
             days: BTreeMap::new(),
+            anomalies: Vec::new(),
         }
     }
 }

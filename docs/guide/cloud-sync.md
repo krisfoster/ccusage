@@ -150,6 +150,22 @@ Days are stored under this machine's own prefix, so two machines never overwrite
 each other's data and a day you sync from a laptop stays intact when a desktop
 syncs the same day.
 
+### Settled days
+
+Two days after a UTC day ends, its uploaded data is marked settled and is not
+expected to change again. If your local logs later disagree with a settled day,
+`run` still uploads the correction — your machine's logs are the authority for
+its own usage — but warns you:
+
+```
+Warning: 1 finalized day(s) changed and were rewritten: 2026-09-10.
+```
+
+The correction is recorded so the dashboard can flag the day, which matters if
+you exported or quoted a total before it moved. A run that reports this
+repeatedly for the same day usually means a clock problem or a log being
+rewritten after the fact.
+
 Uploaded days hold token counts, costs, and 15-minute activity buckets. Project
 paths are hashed with your bucket's salt before upload, and prompts, file
 contents, and file paths are never uploaded.

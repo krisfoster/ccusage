@@ -9,7 +9,7 @@
 use ccusage_config::ConfigContext;
 use ccusage_core::LoadedEntry;
 use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, UtcDate};
-use ccusage_sync::{FoldContext, FoldEntry, Salt, Shard, fold};
+use ccusage_sync::{FoldContext, FoldEntry, Salt, Shard, fold, is_finalized};
 use std::sync::Arc;
 
 use super::machine::{self, IndexEntry, MachineIndex};
@@ -32,45 +32,68 @@ const AGENT: &str = "claude";
 pub(crate) struct RunSummary {
     pub uploaded: Vec<String>,
     pub unchanged: usize,
+    /// Days that changed after they had settled. Reported because a reader may
+    /// already have cached a total this run has just moved.
+    pub late_edits: Vec<String>,
 }
 
 impl RunSummary {
     pub fn to_text(&self, dry_run: bool) -> String {
-        if self.uploaded.is_empty() {
-            return format!("Nothing to sync; {} days already current.", self.unchanged);
+        let mut text = if self.uploaded.is_empty() {
+            format!("Nothing to sync; {} days already current.", self.unchanged)
+        } else {
+            let verb = if dry_run { "Would upload" } else { "Uploaded" };
+            format!(
+                "{verb} {} day(s): {}. {} already current.",
+                self.uploaded.len(),
+                self.uploaded.join(", "),
+                self.unchanged
+            )
+        };
+        if !self.late_edits.is_empty() {
+            text.push_str(&format!(
+                " Warning: {} finalized day(s) changed and were rewritten: {}.",
+                self.late_edits.len(),
+                self.late_edits.join(", ")
+            ));
         }
-        let verb = if dry_run { "Would upload" } else { "Uploaded" };
-        format!(
-            "{verb} {} day(s): {}. {} already current.",
-            self.uploaded.len(),
-            self.uploaded.join(", "),
-            self.unchanged
-        )
+        text
     }
+}
+
+/// What an upload would do, decided before anything is written.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct UploadPlan {
+    pub uploads: Vec<Shard>,
+    pub unchanged: usize,
+    /// Dates whose shard had been finalized and changed anyway.
+    pub late_edits: Vec<String>,
 }
 
 /// Splits folded shards into the ones the bucket needs and the ones it has.
 ///
 /// Both sides are driven by the shard's own content hash, which excludes the
 /// generation timestamp, so re-running sync on unchanged logs uploads nothing.
-pub(crate) fn plan_uploads(
-    shards: Vec<Shard>,
-    index: &MachineIndex,
-    agent: &str,
-) -> (Vec<Shard>, usize) {
-    let mut uploads = Vec::new();
-    let mut unchanged = 0;
+/// A day that had settled and changed anyway is still uploaded — the machine's
+/// own logs are the authority for its own usage, and refusing the write would
+/// leave the bucket knowingly wrong — but it is reported rather than folded in
+/// silently.
+pub(crate) fn plan_uploads(shards: Vec<Shard>, index: &MachineIndex, agent: &str) -> UploadPlan {
+    let mut plan = UploadPlan::default();
     for mut shard in shards {
         let Ok(hash) = shard.finish().map(str::to_string) else {
             continue;
         };
         if index.is_current(agent, &shard.utc_date, &hash) {
-            unchanged += 1;
-        } else {
-            uploads.push(shard);
+            plan.unchanged += 1;
+            continue;
         }
+        if index.is_finalized(agent, &shard.utc_date) {
+            plan.late_edits.push(shard.utc_date.clone());
+        }
+        plan.uploads.push(shard);
     }
-    (uploads, unchanged)
+    plan
 }
 
 /// Uploads the planned shards and records them in the machine index.
@@ -86,6 +109,7 @@ pub(crate) fn upload(
     machine_id: &str,
     shards: &[Shard],
     now: &str,
+    now_ms: i64,
 ) -> std::result::Result<Vec<String>, String> {
     let mut written = Vec::new();
     for shard in shards {
@@ -107,12 +131,25 @@ pub(crate) fn upload(
             let Some(hash) = shard.content_hash.clone() else {
                 continue;
             };
+            let entry_key = MachineIndex::entry_key(&shard.agent, &shard.utc_date);
+            let previous = index.shards.get(&entry_key);
+            let was_finalized = previous.is_some_and(|entry| entry.finalized);
+            let late = was_finalized && previous.is_some_and(|entry| entry.content_hash != hash);
             index.shards.insert(
-                MachineIndex::entry_key(&shard.agent, &shard.utc_date),
+                entry_key,
                 IndexEntry {
                     content_hash: hash,
-                    finalized: false,
+                    // Once set, finalization stays set: a clock that jumps
+                    // backwards must not un-settle a day and hide the edits
+                    // that follow.
+                    finalized: was_finalized || is_finalized(&shard.utc_date, now_ms),
                     updated_at: now.to_string(),
+                    late_edits: previous.map_or(0, |entry| entry.late_edits) + u32::from(late),
+                    last_late_edit_at: if late {
+                        Some(now.to_string())
+                    } else {
+                        previous.and_then(|entry| entry.last_late_edit_at.clone())
+                    },
                 },
             );
         }
@@ -197,17 +234,30 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     );
     let store = GcsStore::new(&bucket, Box::new(Arc::clone(&credentials)));
     let index = machine::load_index(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
-    let (uploads, unchanged) = plan_uploads(shards, &index, AGENT);
+    let plan = plan_uploads(shards, &index, AGENT);
 
     let summary = if args.dry_run {
         RunSummary {
-            uploaded: uploads.iter().map(|shard| shard.utc_date.clone()).collect(),
-            unchanged,
+            uploaded: plan
+                .uploads
+                .iter()
+                .map(|shard| shard.utc_date.clone())
+                .collect(),
+            unchanged: plan.unchanged,
+            late_edits: plan.late_edits,
         }
     } else {
         let now = iso_now();
-        let uploaded =
-            upload(&store, &keys, &user_id, &machine_id, &uploads, &now).map_err(cli_error)?;
+        let uploaded = upload(
+            &store,
+            &keys,
+            &user_id,
+            &machine_id,
+            &plan.uploads,
+            &now,
+            now_ms(),
+        )
+        .map_err(cli_error)?;
         machine::update_machine(&store, &keys, &user_id, &machine_id, |record| {
             record.last_sync_at = Some(now.clone());
         })
@@ -219,7 +269,8 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
         println!("{}", rollup.to_text());
         RunSummary {
             uploaded,
-            unchanged,
+            unchanged: plan.unchanged,
+            late_edits: plan.late_edits,
         }
     };
     println!("{}", summary.to_text(args.dry_run));
@@ -256,6 +307,9 @@ mod tests {
     const USER: &str = "user-1";
     const MACHINE: &str = "machine-1";
     const NOW: &str = "2026-09-17T18:12:03Z";
+    const NOW_MS: i64 = 1_789_661_523_000;
+    /// Far enough past 2026-09-18T00:00Z that 2026-09-17 has settled.
+    const MUCH_LATER_MS: i64 = NOW_MS + 7 * 24 * 60 * 60 * 1000;
 
     fn keys() -> KeySpace {
         KeySpace::new("ccusage/v1").expect("prefix")
@@ -298,10 +352,11 @@ mod tests {
         let salt = salt();
         let index = MachineIndex::default();
 
-        let (uploads, unchanged) = plan_uploads(shards(&salt, 10), &index, AGENT);
-        let written = upload(&store, &keys, USER, MACHINE, &uploads, NOW).expect("upload");
+        let plan = plan_uploads(shards(&salt, 10), &index, AGENT);
+        let written =
+            upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect("upload");
 
-        assert_eq!(unchanged, 0);
+        assert_eq!(plan.unchanged, 0);
         assert_eq!(written, vec!["2026-09-17".to_string()]);
         let key = keys
             .shard(
@@ -326,14 +381,14 @@ mod tests {
         let store = MemoryStore::new();
         let keys = keys();
         let salt = salt();
-        let (uploads, _) = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
-        upload(&store, &keys, USER, MACHINE, &uploads, NOW).expect("upload");
+        let plan = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+        upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect("upload");
         let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
 
-        let (uploads, unchanged) = plan_uploads(shards(&salt, 10), &index, AGENT);
+        let plan = plan_uploads(shards(&salt, 10), &index, AGENT);
 
-        assert!(uploads.is_empty());
-        assert_eq!(unchanged, 1);
+        assert!(plan.uploads.is_empty());
+        assert_eq!(plan.unchanged, 1);
     }
 
     #[test]
@@ -341,14 +396,124 @@ mod tests {
         let store = MemoryStore::new();
         let keys = keys();
         let salt = salt();
-        let (uploads, _) = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
-        upload(&store, &keys, USER, MACHINE, &uploads, NOW).expect("upload");
+        let plan = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+        upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect("upload");
         let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
 
-        let (uploads, unchanged) = plan_uploads(shards(&salt, 20), &index, AGENT);
+        let plan = plan_uploads(shards(&salt, 20), &index, AGENT);
 
-        assert_eq!(uploads.len(), 1);
-        assert_eq!(unchanged, 0);
+        assert_eq!(plan.uploads.len(), 1);
+        assert_eq!(plan.unchanged, 0);
+    }
+
+    /// A day synced while it is still running must stay open, or every entry
+    /// logged later that day would arrive as an anomaly.
+    #[test]
+    fn a_day_synced_while_it_is_running_is_not_finalized() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let plan = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+
+        upload(&store, &keys, USER, MACHINE, &plan.uploads, NOW, NOW_MS).expect("upload");
+
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        assert!(!index.is_finalized(AGENT, "2026-09-17"));
+        assert!(plan.late_edits.is_empty());
+    }
+
+    #[test]
+    fn a_day_synced_well_after_it_ended_is_finalized() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let plan = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+
+        upload(
+            &store,
+            &keys,
+            USER,
+            MACHINE,
+            &plan.uploads,
+            NOW,
+            MUCH_LATER_MS,
+        )
+        .expect("upload");
+
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        assert!(index.is_finalized(AGENT, "2026-09-17"));
+        // Settling a day for the first time is not itself a late edit.
+        assert_eq!(
+            index.shards[&MachineIndex::entry_key(AGENT, "2026-09-17")].late_edits,
+            0
+        );
+    }
+
+    /// The rewrite still happens — this machine's logs are the authority for
+    /// its own usage — but it is counted and reported, not applied silently.
+    #[test]
+    fn rewriting_a_settled_day_is_recorded_and_still_uploaded() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let first = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+        upload(
+            &store,
+            &keys,
+            USER,
+            MACHINE,
+            &first.uploads,
+            NOW,
+            MUCH_LATER_MS,
+        )
+        .expect("upload");
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+
+        let second = plan_uploads(shards(&salt, 20), &index, AGENT);
+        upload(
+            &store,
+            &keys,
+            USER,
+            MACHINE,
+            &second.uploads,
+            NOW,
+            MUCH_LATER_MS,
+        )
+        .expect("upload");
+
+        assert_eq!(second.late_edits, vec!["2026-09-17".to_string()]);
+        assert_eq!(second.uploads.len(), 1);
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        let entry = &index.shards[&MachineIndex::entry_key(AGENT, "2026-09-17")];
+        assert_eq!(entry.late_edits, 1);
+        assert_eq!(entry.last_late_edit_at.as_deref(), Some(NOW));
+    }
+
+    /// A clock that jumps backwards must not un-settle a day and hide the
+    /// edits that follow it.
+    #[test]
+    fn a_settled_day_stays_settled_when_the_clock_goes_backwards() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let salt = salt();
+        let first = plan_uploads(shards(&salt, 10), &MachineIndex::default(), AGENT);
+        upload(
+            &store,
+            &keys,
+            USER,
+            MACHINE,
+            &first.uploads,
+            NOW,
+            MUCH_LATER_MS,
+        )
+        .expect("upload");
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+
+        let second = plan_uploads(shards(&salt, 20), &index, AGENT);
+        upload(&store, &keys, USER, MACHINE, &second.uploads, NOW, NOW_MS).expect("upload");
+
+        let index = machine::load_index(&store, &keys, USER, MACHINE).expect("index");
+        assert!(index.is_finalized(AGENT, "2026-09-17"));
     }
 
     /// The index must never claim a shard the bucket does not hold.
@@ -357,7 +522,7 @@ mod tests {
         let store = MemoryStore::new();
         let keys = keys();
 
-        let written = upload(&store, &keys, USER, MACHINE, &[], NOW).expect("upload");
+        let written = upload(&store, &keys, USER, MACHINE, &[], NOW, NOW_MS).expect("upload");
 
         assert!(written.is_empty());
         assert!(
@@ -373,6 +538,7 @@ mod tests {
         let summary = RunSummary {
             uploaded: vec!["2026-09-17".to_string()],
             unchanged: 2,
+            late_edits: Vec::new(),
         };
 
         assert!(summary.to_text(true).starts_with("Would upload 1 day(s)"));
@@ -381,6 +547,19 @@ mod tests {
             RunSummary::default().to_text(false),
             "Nothing to sync; 0 days already current."
         );
+    }
+
+    #[test]
+    fn a_summary_warns_about_days_that_changed_after_they_settled() {
+        let summary = RunSummary {
+            uploaded: vec!["2026-09-10".to_string()],
+            unchanged: 0,
+            late_edits: vec!["2026-09-10".to_string()],
+        };
+
+        let text = summary.to_text(false);
+        assert!(text.contains("Warning"), "{text}");
+        assert!(text.contains("2026-09-10"), "{text}");
     }
 
     #[test]

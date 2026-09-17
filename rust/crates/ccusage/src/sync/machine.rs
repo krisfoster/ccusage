@@ -44,10 +44,22 @@ pub(crate) struct MachineRecord {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IndexEntry {
     pub content_hash: String,
-    /// A finalized shard is not rewritten again, so a reader can cache it.
+    /// A finalized shard is not expected to be rewritten, so a reader can cache
+    /// it — and a rewrite after this is set is an anomaly worth reporting.
     #[serde(default)]
     pub finalized: bool,
     pub updated_at: String,
+    /// How many times this shard changed after it had been finalized. Kept
+    /// rather than a bare flag so a machine with a clock or log problem is
+    /// visibly different from one that corrected a day once.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub late_edits: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_late_edit_at: Option<String>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Which shards this machine has uploaded, keyed by `<agent>/<YYYY-MM-DD>`.
@@ -81,6 +93,13 @@ impl MachineIndex {
         self.shards
             .get(&Self::entry_key(agent, utc_date))
             .is_some_and(|entry| entry.content_hash == content_hash)
+    }
+
+    /// Whether the uploaded shard for this day was already settled.
+    pub fn is_finalized(&self, agent: &str, utc_date: &str) -> bool {
+        self.shards
+            .get(&Self::entry_key(agent, utc_date))
+            .is_some_and(|entry| entry.finalized)
     }
 }
 
@@ -201,6 +220,7 @@ mod tests {
             content_hash: hash.to_string(),
             finalized: false,
             updated_at: "2026-09-17T18:12:03Z".to_string(),
+            ..IndexEntry::default()
         }
     }
 
