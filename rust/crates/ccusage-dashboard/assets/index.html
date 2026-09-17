@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="robots" content="noindex" />
+		<title>ccusage</title>
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body>
+		<header class="bar">
+			<h1>ccusage</h1>
+			<div class="controls">
+				<label>
+					Timezone
+					<select id="timezone"></select>
+				</label>
+				<span id="freshness" class="muted"></span>
+			</div>
+		</header>
+
+		<main id="app" hidden>
+			<section class="totals" id="totals"></section>
+			<section class="panel">
+				<h2>Daily spend</h2>
+				<div id="series" class="series"></div>
+			</section>
+			<section class="grid">
+				<div class="panel">
+					<h2>Models</h2>
+					<div id="models"></div>
+				</div>
+				<div class="panel">
+					<h2>Machines</h2>
+					<div id="machines"></div>
+				</div>
+				<div class="panel">
+					<h2>Agents</h2>
+					<div id="agents"></div>
+				</div>
+				<div class="panel">
+					<h2>Weeks</h2>
+					<div id="weekly"></div>
+				</div>
+				<div class="panel">
+					<h2>Months</h2>
+					<div id="monthly"></div>
+				</div>
+				<div class="panel">
+					<h2>Notices</h2>
+					<div id="notices"></div>
+				</div>
+			</section>
+			<section class="panel">
+				<h2>What another provider would have charged</h2>
+				<div id="compare"></div>
+				<p class="muted" id="compare-note"></p>
+			</section>
+		</main>
+
+		<section id="gate" class="panel gate">
+			<h2>No data loaded</h2>
+			<p id="gate-detail">Loading…</p>
+			<p class="muted">
+				Usage data in this bucket is private. This page is public; the numbers are
+				not. Open it with a link from <code>ccusage sync dashboard --share</code>,
+				or run <code>ccusage sync dashboard</code> to host it locally against your
+				own credentials.
+			</p>
+		</section>
+
+		<footer class="muted" id="attribution"></footer>
+		<script src="app.js"></script>
+	</body>
+</html>

@@ -46,6 +46,8 @@ pub enum RollupKind {
     Weekly,
     Monthly,
     Models,
+    /// Dedupe keys behind the daily rollup. Merge state, not a view.
+    Keys,
 }
 
 /// A calendar date in UTC. Shards are keyed by UTC date so the uploader's timezone never leaks
@@ -168,6 +170,14 @@ impl KeySpace {
         self.private("manifest.json")
     }
 
+    /// The per-bucket hash salt every machine writing here must share.
+    ///
+    /// Private by construction: publishing it would make every hashed project
+    /// path in the dashboard reversible by dictionary attack.
+    pub fn salt(&self) -> Key {
+        self.private("salt.json")
+    }
+
     pub fn machine(&self, user_id: &str, machine_id: &str) -> Result<Key> {
         Ok(self.private(&format!(
             "{}machine.json",
@@ -203,6 +213,7 @@ impl KeySpace {
             RollupKind::Weekly => "weekly",
             RollupKind::Monthly => "monthly",
             RollupKind::Models => "models",
+            RollupKind::Keys => "keys",
         };
         self.private(&format!("rollup/{name}.json"))
     }
@@ -228,9 +239,42 @@ impl KeySpace {
         })
     }
 
+    /// A key for an object a listing returned.
+    ///
+    /// Deleting what a listing found needs a `Key`, and inventing one from an
+    /// arbitrary string would be a hole in the public/private invariant, so
+    /// the path is checked to be inside this key space and its visibility is
+    /// derived rather than asserted.
+    pub fn listed(&self, path: &str) -> Result<Key> {
+        let Some(relative) = path.strip_prefix(&format!("{}/", self.prefix)) else {
+            return Err(ObjectStoreError::InvalidKey {
+                key: path.to_string(),
+                reason: format!("is not under the '{}' prefix", self.prefix),
+            });
+        };
+        let visibility = if relative.starts_with(&format!("{DASHBOARD_SEGMENT}/")) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        Ok(Key {
+            path: path.to_string(),
+            visibility,
+        })
+    }
+
     pub fn probe(&self, machine_id: &str) -> Result<Key> {
         validate_segment(machine_id, "machineId")?;
         Ok(self.private(&format!(".probe/{machine_id}")))
+    }
+
+    /// Everything every machine of this user has written.
+    ///
+    /// Listing is how repair rediscovers machines the manifest lost, so it has
+    /// to be reachable without knowing a machine id first.
+    pub fn machines_prefix(&self, user_id: &str) -> Result<String> {
+        validate_segment(user_id, "userId")?;
+        Ok(format!("{}/users/{user_id}/machines/", self.prefix))
     }
 
     pub fn machine_prefix(&self, user_id: &str, machine_id: &str) -> Result<String> {
@@ -272,6 +316,7 @@ mod tests {
     fn builds_the_documented_layout() {
         let s = space();
         assert_eq!(s.manifest().path(), "ccusage/v1/manifest.json");
+        assert_eq!(s.salt().path(), "ccusage/v1/salt.json");
         assert_eq!(
             s.machine("u1", "m1").unwrap().path(),
             "ccusage/v1/users/u1/machines/m1/machine.json"
@@ -300,6 +345,7 @@ mod tests {
     fn classifies_only_dashboard_assets_as_public() {
         let s = space();
         assert_eq!(s.manifest().visibility(), Visibility::Private);
+        assert_eq!(s.salt().visibility(), Visibility::Private);
         assert_eq!(
             s.machine("u1", "m1").unwrap().visibility(),
             Visibility::Private

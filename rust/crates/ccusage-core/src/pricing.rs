@@ -223,6 +223,12 @@ impl Pricing {
         self.cache_create
     }
 
+    /// Whether the published data set a cache-creation price, rather than
+    /// this being the derived `input * 1.25` stand-in.
+    pub fn has_explicit_cache_creation_cost(&self) -> bool {
+        self.cache_create_explicit
+    }
+
     /// Returns the per-token rate for cache creation input above the long-context threshold.
     pub fn cache_creation_input_token_cost_above_200k_tokens(&self) -> Option<f64> {
         self.cache_create_above_200k

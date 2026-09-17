@@ -2,6 +2,7 @@ mod adapter;
 mod blocks;
 mod cli;
 mod commands;
+mod compare;
 mod credentials;
 mod gcs;
 mod http;
@@ -54,6 +55,7 @@ fn main() -> Result<()> {
         Some(Command::Grok(args)) => adapter::grok::run(args),
         Some(Command::ZCode(args)) => adapter::zcode::run(args),
         Some(Command::Sync(args)) => sync::run(args),
+        Some(Command::Compare(args)) => compare::run(args),
         None => {
             let args = AgentCommandArgs {
                 shared: cli.shared,

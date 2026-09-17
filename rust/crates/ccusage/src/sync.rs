@@ -3,9 +3,16 @@
 //! looking like a typo.
 
 pub(crate) mod auth;
+pub(crate) mod bootstrap;
 pub(crate) mod bucket;
+pub(crate) mod dashboard;
 pub(crate) mod doctor;
+pub(crate) mod failures;
+pub(crate) mod machine;
+pub(crate) mod maintenance;
 pub(crate) mod project;
+pub(crate) mod rollups;
+pub(crate) mod run;
 pub(crate) mod status;
 
 use std::{
@@ -19,6 +26,10 @@ use ccusage_config::{
     sync_writeback_path,
 };
 use ccusage_objectstore::KeySpace;
+use ccusage_sync::{
+    fingerprint::{FingerprintSources, observe_fingerprint},
+    identity::{IdentityInputs, os_entropy, resolve_identity},
+};
 
 use crate::{
     Result,
@@ -42,14 +53,54 @@ const STORAGE_ENDPOINT: &str = "https://storage.googleapis.com";
 pub(crate) fn run(args: SyncArgs) -> Result<()> {
     let config = ConfigContext::from_args(&std::env::args().skip(1).collect::<Vec<_>>());
     match args.command {
+        SyncCommand::Run(run_args) => run::execute(&config, &run_args),
         SyncCommand::Setup(setup) => setup_sync(&setup, &config, args.config),
         SyncCommand::Status => show_status(&config, args.json),
         SyncCommand::Doctor => run_doctor(&config, args.json),
-        other => Err(cli_error(format!(
-            "`ccusage sync {}` is not available yet; it arrives in a later release.",
-            other.name()
-        ))),
+        SyncCommand::Repair(repair) => maintenance::execute_repair(&config, &repair),
+        SyncCommand::Forget(forget) => maintenance::execute_forget(&config, &forget),
+        SyncCommand::MergeMachine(merge) => maintenance::execute_merge(&config, &merge),
+        SyncCommand::Dashboard(dashboard_args) => dashboard::execute(&config, &dashboard_args),
     }
+}
+
+/// A configured bucket, opened, with the identity this machine syncs as.
+pub(crate) struct Session {
+    pub store: GcsStore,
+    pub keys: KeySpace,
+    pub user_id: String,
+    pub machine_id: String,
+}
+
+/// Resolves config and credentials into something that can talk to the bucket.
+///
+/// Every command past setup needs the same four values, and each one deciding
+/// for itself how to fall back on a bad prefix is how two commands end up
+/// reading different keys in the same bucket.
+pub(crate) fn connect(config: &ConfigContext) -> Result<Session> {
+    let status = status::Status::from_config(config.sync());
+    let (Some(bucket), Some(machine_id), Some(user_id)) = (
+        status.bucket.clone(),
+        status.machine_id.clone(),
+        status.user_id.clone(),
+    ) else {
+        return Err(cli_error(
+            "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
+        ));
+    };
+    let keys = KeySpace::new(status.prefix.as_str().trim_end_matches('/'))
+        .or_else(|_| KeySpace::new(DEFAULT_PREFIX))
+        .map_err(|error| cli_error(error.to_string()))?;
+    let credentials = Arc::new(
+        auth::resolve(config_auth_mode(config), true, &mut auth::TerminalPrompt)
+            .map_err(|error| cli_error(error.to_string()))?,
+    );
+    Ok(Session {
+        store: GcsStore::new(&bucket, Box::new(credentials)),
+        keys,
+        user_id,
+        machine_id,
+    })
 }
 
 fn show_status(config: &ConfigContext, json: bool) -> Result<()> {
@@ -186,7 +237,9 @@ fn setup_sync(
         setup.bucket.as_deref(),
         configured_bucket.as_deref(),
         setup.recreate,
+        setup.non_interactive,
         &mut bucket::os_entropy,
+        &mut bucket::TerminalNamePrompt,
     )
     .map_err(|error| cli_error(error.to_string()))?;
 
@@ -203,6 +256,56 @@ fn setup_sync(
         .map_err(|error| cli_error(error.to_string()))?;
     println!("Bucket gs://{} ready in {}.", info.name, info.location);
 
+    let prefix = setup
+        .prefix
+        .clone()
+        .unwrap_or_else(|| DEFAULT_PREFIX.to_string());
+    let keys = KeySpace::new(&prefix).map_err(|error| cli_error(error.to_string()))?;
+    let store = GcsStore::new(&info.name, Box::new(Arc::clone(&credentials)));
+    let sync_config = config.sync();
+    let (salt, _) = bootstrap::ensure_salt(
+        &store,
+        &keys,
+        sync_config.and_then(|sync| sync.salt.as_deref()),
+    )
+    .map_err(cli_error)?;
+
+    // The bucket's user ID wins over a freshly minted one, so pointing a second
+    // machine at an existing bucket is the whole of joining it.
+    let manifest_user_id = bootstrap::manifest_user_id(&store, &keys).map_err(cli_error)?;
+    let identity = resolve_identity(
+        &IdentityInputs {
+            configured_user_id: sync_config.and_then(|sync| sync.user_id.as_deref()),
+            manifest_user_id: manifest_user_id.as_deref(),
+            configured_machine_id: sync_config.and_then(|sync| sync.machine_id.as_deref()),
+            ..IdentityInputs::default()
+        },
+        &mut os_entropy,
+    )
+    .map_err(|error| cli_error(error.to_string()))?;
+    bootstrap::ensure_manifest(&store, &keys, identity.user.as_str()).map_err(cli_error)?;
+    let machine_id = identity.machine.to_string();
+    bootstrap::register_machine(&store, &keys, identity.user.as_str(), &machine_id)
+        .map_err(cli_error)?;
+    let fingerprint = observe_fingerprint(&FingerprintSources::platform_default());
+    let label = sync_config.and_then(|sync| sync.machine_label.clone());
+    machine::update_machine(
+        &store,
+        &keys,
+        identity.user.as_str(),
+        &machine_id,
+        |record| {
+            record.label.clone_from(&label);
+            record.os = Some(std::env::consts::OS.to_string());
+            record.fingerprint.clone_from(&fingerprint);
+        },
+    )
+    .map_err(cli_error)?;
+    for warning in &identity.warnings {
+        println!("{warning}");
+    }
+    println!("Syncing as machine {machine_id}.");
+
     let Some(path) = sync_writeback_path(config_path.as_deref()) else {
         return Err(cli_error(
             "no writable ccusage.json location could be determined; pass --config with a path"
@@ -216,13 +319,10 @@ fn setup_sync(
             project_id: Some(project.id.clone()),
             bucket: Some(info.name.clone()),
             location: Some(info.location.clone()),
-            prefix: Some(
-                setup
-                    .prefix
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_PREFIX.to_string()),
-            ),
-            ..SyncWriteback::default()
+            prefix: Some(prefix),
+            machine_id: Some(machine_id),
+            user_id: Some(identity.user.to_string()),
+            salt: Some(salt.expose().to_string()),
         },
     )
     .map_err(cli_error)?;

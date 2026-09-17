@@ -29,6 +29,20 @@ pub enum Command {
     Grok(AgentCommandArgs),
     ZCode(AgentCommandArgs),
     Sync(SyncArgs),
+    Compare(CompareArgs),
+}
+
+/// `ccusage compare`: the same usage priced as though another provider had
+/// served it.
+#[derive(Clone, Debug, Default)]
+pub struct CompareArgs {
+    pub shared: SharedArgs,
+    /// A single provider to compare against. `None` compares every provider
+    /// the equivalence map knows.
+    pub provider: Option<String>,
+    /// A replacement equivalence map, for a user who disagrees with the
+    /// curated pairings.
+    pub equivalence: Option<PathBuf>,
 }
 
 /// Options every `sync` subcommand accepts, plus the subcommand itself.
@@ -70,6 +84,9 @@ impl SyncCommand {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SyncRunArgs {
     pub dry_run: bool,
+    /// Days of history to keep. `None` keeps everything: deletion is never
+    /// implicit, so retention only applies when the user asks for it.
+    pub prune: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

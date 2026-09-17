@@ -13441,6 +13441,11 @@
 							"markdownDescription": "Replace project names with salted hashes before uploading.",
 							"type": "boolean"
 						},
+						"salt": {
+							"description": "Per-bucket salt every hash in the bucket is built from, adopted from the bucket at setup. Machines that disagree about it cannot deduplicate.",
+							"markdownDescription": "Per-bucket salt every hash in the bucket is built from, adopted from the bucket at setup. Machines that disagree about it cannot deduplicate.",
+							"type": "string"
+						},
 						"userId": {
 							"description": "Identifier shared by every machine that syncs into this bucket.",
 							"markdownDescription": "Identifier shared by every machine that syncs into this bucket.",

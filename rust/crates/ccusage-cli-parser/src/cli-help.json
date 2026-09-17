@@ -436,11 +436,27 @@
 			"description": "Display this help message"
 		}
 	],
+	"compare_options": [
+		{
+			"flags": "--provider <provider>",
+			"description": "Compare against one provider only (e.g. zai)",
+			"default": "every provider in the map"
+		},
+		{
+			"flags": "--equivalence <path>",
+			"description": "Use a custom model-equivalence map instead of the built-in one"
+		}
+	],
 	"sync_run_options": [
 		{
 			"flags": "--dry-run",
 			"description": "Report what would be uploaded without writing to the bucket",
 			"default": "false"
+		},
+		{
+			"flags": "--prune <days>",
+			"description": "Delete uploaded days older than this many days",
+			"default": "keep everything"
 		}
 	],
 	"sync_setup_options": [

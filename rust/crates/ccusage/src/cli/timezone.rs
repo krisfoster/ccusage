@@ -34,6 +34,7 @@ fn command_shared(command: &Command) -> &SharedArgs {
         Command::Weekly(args) => &args.shared,
         Command::Session(args) => &args.shared,
         Command::Blocks(args) => &args.shared,
+        Command::Compare(args) => &args.shared,
         Command::All(args)
         | Command::Codex(args)
         | Command::OpenCode(args)

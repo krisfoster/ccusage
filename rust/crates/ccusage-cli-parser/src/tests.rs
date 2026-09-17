@@ -208,6 +208,12 @@ fn command_snapshot(command: Option<Command>) -> Value {
         Some(Command::OpenClaw(args)) => agent_command_snapshot("openclaw", args),
         Some(Command::Grok(args)) => agent_command_snapshot("grok", args),
         Some(Command::ZCode(args)) => agent_command_snapshot("zcode", args),
+        Some(Command::Compare(args)) => json!({
+            "type": "compare",
+            "shared": shared_snapshot(&args.shared),
+            "provider": args.provider,
+            "equivalence": args.equivalence.map(|path| path.to_string_lossy().into_owned()),
+        }),
         Some(Command::Sync(args)) => json!({
             "type": "sync",
             "subcommand": args.command.name(),
@@ -518,6 +524,37 @@ fn sync_setup_flags_win_over_the_config_block() {
     assert_eq!(setup.project.as_deref(), Some("config-project"));
     assert_eq!(setup.prefix.as_deref(), Some("ccusage/v1"));
     assert_eq!(setup.auth, SyncAuthMode::Adc);
+}
+
+#[test]
+fn compare_takes_a_provider_a_map_and_the_shared_window() {
+    let cli = parse(&[
+        "ccusage",
+        "compare",
+        "--provider",
+        "zai",
+        "--equivalence",
+        "/tmp/map.json",
+        "--since",
+        "20250101",
+        "--json",
+    ]);
+
+    let Some(Command::Compare(args)) = cli.command else {
+        panic!("expected a compare command");
+    };
+    assert_eq!(args.provider.as_deref(), Some("zai"));
+    assert_eq!(
+        args.equivalence.as_deref(),
+        Some(std::path::Path::new("/tmp/map.json"))
+    );
+    assert_eq!(args.shared.since.as_deref(), Some("20250101"));
+    assert!(args.shared.json);
+}
+
+#[test]
+fn compare_rejects_an_option_it_does_not_have() {
+    assert!(parse_error(&["ccusage", "compare", "--instances"]).contains("compare"));
 }
 
 #[test]
@@ -1688,7 +1725,10 @@ fn bare_sync_runs_a_sync() {
 
     assert_eq!(
         args.command,
-        SyncCommand::Run(SyncRunArgs { dry_run: false })
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: false,
+            prune: None
+        })
     );
     assert!(!args.json);
 }
@@ -1699,7 +1739,37 @@ fn sync_run_accepts_dry_run_without_naming_the_subcommand() {
 
     assert_eq!(
         args.command,
-        SyncCommand::Run(SyncRunArgs { dry_run: true })
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: true,
+            prune: None
+        })
+    );
+}
+
+#[test]
+fn sync_run_takes_a_retention_window_in_days() {
+    let args = sync_args(&["ccusage", "sync", "run", "--prune", "365"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Run(SyncRunArgs {
+            dry_run: false,
+            prune: Some(365)
+        })
+    );
+}
+
+/// Retention deletes data, so a window that cannot be meant literally is a
+/// parse error rather than a rounding decision.
+#[test]
+fn a_retention_window_that_is_not_a_positive_number_of_days_is_rejected() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "run", "--prune", "0"]),
+        "--prune takes a number of days to keep, such as --prune 365; got '0'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "run", "--prune", "forever"]),
+        "--prune takes a number of days to keep, such as --prune 365; got 'forever'"
     );
 }
 

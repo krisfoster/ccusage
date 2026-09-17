@@ -3,11 +3,14 @@
 //!
 //! Naming is the delicate part. A bucket name is globally unique across all of
 //! Google Cloud, so a guessable name is both likely to be taken and, once taken
-//! by someone else, an invitation to probe it. Setup therefore mints a random
-//! name rather than deriving one from the user or machine, and once a name is in
-//! the config it is never silently replaced: pointing at a different bucket
-//! abandons the history in the old one, which is a choice the user makes with
-//! `--recreate`, not one a flag typo makes for them.
+//! by someone else, an invitation to probe it. Setup therefore suggests a random
+//! name rather than deriving one from the user or machine, and lets the user
+//! type their own; once a name is in the config it is never silently replaced,
+//! because pointing at a different bucket abandons the history in the old one,
+//! which is a choice the user makes with `--recreate`, not one a flag typo makes
+//! for them.
+
+use std::io::{IsTerminal as _, Write as _};
 
 use ccusage_objectstore::{ObjectStoreError, Result};
 use serde_json::Value;
@@ -38,11 +41,41 @@ pub(crate) struct PlannedBucket {
     pub(crate) origin: BucketOrigin,
 }
 
+/// Asks for a bucket name, offering the minted one as the default. Injected so
+/// the tests never touch a terminal.
+pub(crate) trait NamePrompt {
+    fn ask(&mut self, suggestion: &str) -> Option<String>;
+}
+
+/// Off a terminal this answers nothing, which leaves the suggestion in place
+/// rather than consuming piped input meant for something else.
+pub(crate) struct TerminalNamePrompt;
+
+impl NamePrompt for TerminalNamePrompt {
+    fn ask(&mut self, suggestion: &str) -> Option<String> {
+        let mut stdout = std::io::stdout();
+        if !std::io::stdin().is_terminal() || !stdout.is_terminal() {
+            return None;
+        }
+        let _ = writeln!(
+            stdout,
+            "Bucket names are globally unique across Google Cloud."
+        );
+        let _ = write!(stdout, "Bucket name [{suggestion}]: ");
+        let _ = stdout.flush();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok()?;
+        Some(answer.trim().to_string())
+    }
+}
+
 pub(crate) fn plan(
     requested: Option<&str>,
     configured: Option<&str>,
     recreate: bool,
+    non_interactive: bool,
     entropy: &mut dyn FnMut() -> [u8; MINTED_BYTES],
+    prompt: &mut dyn NamePrompt,
 ) -> Result<PlannedBucket> {
     let configured = configured.map(str::trim).filter(|name| !name.is_empty());
     let requested = match requested.map(str::trim).filter(|name| !name.is_empty()) {
@@ -73,10 +106,29 @@ pub(crate) fn plan(
             name: normalize(configured)?,
             origin: BucketOrigin::Configured,
         }),
-        (None, None) => Ok(PlannedBucket {
-            name: mint(entropy()),
-            origin: BucketOrigin::Minted,
-        }),
+        (None, None) => {
+            let suggestion = mint(entropy());
+            if non_interactive {
+                return Ok(PlannedBucket {
+                    name: suggestion,
+                    origin: BucketOrigin::Minted,
+                });
+            }
+            match prompt
+                .ask(&suggestion)
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+            {
+                Some(typed) => Ok(PlannedBucket {
+                    name: normalize(&typed)?,
+                    origin: BucketOrigin::Requested,
+                }),
+                None => Ok(PlannedBucket {
+                    name: suggestion,
+                    origin: BucketOrigin::Minted,
+                }),
+            }
+        }
     }
 }
 
@@ -197,9 +249,63 @@ mod tests {
         || [0x9f, 0x3a, 0x1c, 0x2b, 0x44, 0x05]
     }
 
+    /// Answers the name question with a fixed reply, recording the suggestion.
+    struct Answer {
+        reply: Option<&'static str>,
+        suggestions: Vec<String>,
+    }
+
+    impl Answer {
+        fn of(reply: Option<&'static str>) -> Self {
+            Self {
+                reply,
+                suggestions: Vec::new(),
+            }
+        }
+    }
+
+    impl NamePrompt for Answer {
+        fn ask(&mut self, suggestion: &str) -> Option<String> {
+            self.suggestions.push(suggestion.to_string());
+            self.reply.map(str::to_string)
+        }
+    }
+
+    struct RefusingPrompt;
+
+    impl NamePrompt for RefusingPrompt {
+        fn ask(&mut self, _: &str) -> Option<String> {
+            panic!("nothing here should ask for a name");
+        }
+    }
+
     #[test]
-    fn mints_an_unguessable_name_on_a_first_setup() {
-        let planned = plan(None, None, false, &mut fixed_entropy()).expect("plan");
+    fn a_first_setup_asks_for_a_name_and_suggests_an_unguessable_one() {
+        let prompt = &mut Answer::of(Some("my-usage-bucket"));
+
+        let planned = plan(None, None, false, false, &mut fixed_entropy(), prompt).expect("plan");
+
+        assert_eq!(prompt.suggestions, vec!["ccusage-9f3a1c2b4405".to_string()]);
+        assert_eq!(
+            planned,
+            PlannedBucket {
+                name: "my-usage-bucket".to_string(),
+                origin: BucketOrigin::Requested,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_takes_the_suggested_name() {
+        let planned = plan(
+            None,
+            None,
+            false,
+            false,
+            &mut fixed_entropy(),
+            &mut Answer::of(Some("  ")),
+        )
+        .expect("plan");
 
         assert_eq!(
             planned,
@@ -211,9 +317,49 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_name_cloud_storage_would_reject_is_reported_before_the_api() {
+        let error = plan(
+            None,
+            None,
+            false,
+            false,
+            &mut fixed_entropy(),
+            &mut Answer::of(Some("My Bucket")),
+        )
+        .expect_err("an invalid typed name should not reach the API");
+
+        assert!(
+            matches!(error, ObjectStoreError::InvalidKey { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unattended_setup_mints_a_name_without_asking() {
+        let planned = plan(
+            None,
+            None,
+            false,
+            true,
+            &mut fixed_entropy(),
+            &mut RefusingPrompt,
+        )
+        .expect("plan");
+
+        assert_eq!(planned.origin, BucketOrigin::Minted);
+    }
+
+    #[test]
     fn re_running_setup_keeps_the_configured_bucket() {
-        let planned = plan(None, Some("ccusage-existing"), false, &mut fixed_entropy())
-            .expect("a second run must not mint a second bucket");
+        let planned = plan(
+            None,
+            Some("ccusage-existing"),
+            false,
+            false,
+            &mut fixed_entropy(),
+            &mut RefusingPrompt,
+        )
+        .expect("a second run must not mint a second bucket");
 
         assert_eq!(planned.name, "ccusage-existing");
         assert_eq!(planned.origin, BucketOrigin::Configured);
@@ -225,7 +371,9 @@ mod tests {
             Some("ccusage-other"),
             Some("ccusage-existing"),
             false,
+            false,
             &mut fixed_entropy(),
+            &mut RefusingPrompt,
         )
         .expect_err("switching buckets silently would hide the old data");
 
@@ -240,7 +388,9 @@ mod tests {
             Some("ccusage-other"),
             Some("ccusage-existing"),
             true,
+            false,
             &mut fixed_entropy(),
+            &mut RefusingPrompt,
         )
         .expect("plan");
 
@@ -254,7 +404,9 @@ mod tests {
             Some("gs://ccusage-existing/"),
             Some("ccusage-existing"),
             false,
+            false,
             &mut fixed_entropy(),
+            &mut RefusingPrompt,
         )
         .expect("the same bucket spelled as a URL is the same bucket");
 
@@ -264,8 +416,15 @@ mod tests {
     #[test]
     fn rejects_names_cloud_storage_would_reject() {
         for name in ["ab", "Ccusage Bucket", "-leading", "google-usage"] {
-            let error = plan(Some(name), None, false, &mut fixed_entropy())
-                .expect_err("invalid name should not reach the API");
+            let error = plan(
+                Some(name),
+                None,
+                false,
+                false,
+                &mut fixed_entropy(),
+                &mut RefusingPrompt,
+            )
+            .expect_err("invalid name should not reach the API");
             assert!(
                 matches!(error, ObjectStoreError::InvalidKey { .. }),
                 "{name}: {error}"

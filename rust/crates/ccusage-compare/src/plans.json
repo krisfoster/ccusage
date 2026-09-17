@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "updated": "2026-09-17",
+  "note": "Flat-fee subscription tiers, kept apart from the per-token math because a plan buys rate-limited capacity rather than a token price. List prices only; annual and regional discounts are not modelled.",
+  "plans": [
+    { "provider": "anthropic", "id": "claude-pro", "label": "Claude Pro", "monthlyUsd": 20.0 },
+    { "provider": "anthropic", "id": "claude-max-5x", "label": "Claude Max 5x", "monthlyUsd": 100.0 },
+    { "provider": "anthropic", "id": "claude-max-20x", "label": "Claude Max 20x", "monthlyUsd": 200.0 },
+    { "provider": "zai", "id": "glm-coding-lite", "label": "GLM Coding Lite", "monthlyUsd": 6.0 },
+    { "provider": "zai", "id": "glm-coding-pro", "label": "GLM Coding Pro", "monthlyUsd": 30.0 },
+    { "provider": "openai", "id": "chatgpt-plus", "label": "ChatGPT Plus", "monthlyUsd": 20.0 },
+    { "provider": "openai", "id": "chatgpt-pro", "label": "ChatGPT Pro", "monthlyUsd": 200.0 },
+    { "provider": "google", "id": "google-ai-pro", "label": "Google AI Pro", "monthlyUsd": 19.99 }
+  ]
+}

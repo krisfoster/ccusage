@@ -152,9 +152,12 @@ dependencies = [
  "ccusage-adapter-zcode",
  "ccusage-cli",
  "ccusage-cli-parser",
+ "ccusage-compare",
  "ccusage-config",
  "ccusage-core",
+ "ccusage-dashboard",
  "ccusage-objectstore",
+ "ccusage-sync",
  "ccusage-test-support",
  "getrandom 0.4.3",
  "insta",
@@ -452,6 +455,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccusage-compare"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ccusage-config"
 version = "0.0.0"
 dependencies = [
@@ -483,6 +494,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccusage-dashboard"
+version = "0.0.0"
+
+[[package]]
 name = "ccusage-objectstore"
 version = "0.0.0"
 dependencies = [
@@ -496,6 +511,9 @@ version = "0.0.0"
 dependencies = [
  "ccusage-test-support",
  "getrandom 0.4.3",
+ "jiff",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
