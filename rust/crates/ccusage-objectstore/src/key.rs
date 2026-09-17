@@ -130,6 +130,8 @@ pub struct KeySpace {
     prefix: String,
 }
 
+const DASHBOARD_SEGMENT: &str = "dashboard";
+
 impl KeySpace {
     pub fn new(prefix: &str) -> Result<Self> {
         let invalid = |reason: &str| ObjectStoreError::InvalidKey {
@@ -152,6 +154,14 @@ impl KeySpace {
 
     pub fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    /// Every key that is world-readable starts with this, and no other key does.
+    ///
+    /// The bucket's public IAM binding is built from this, so the grant and the
+    /// keys cannot drift apart.
+    pub fn public_prefix(&self) -> String {
+        format!("{}/{DASHBOARD_SEGMENT}/", self.prefix)
     }
 
     pub fn manifest(&self) -> Key {
@@ -213,7 +223,7 @@ impl KeySpace {
             validate_segment(segment, "asset path segment")?;
         }
         Ok(Key {
-            path: format!("{}/dashboard/{relative}", self.prefix),
+            path: format!("{}{relative}", self.public_prefix()),
             visibility: Visibility::Public,
         })
     }

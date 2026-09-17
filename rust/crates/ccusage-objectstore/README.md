@@ -24,7 +24,8 @@ next to `http.rs`, the same seam pricing uses.
 - **The public/private split.** The dashboard prefix is world-readable and everything else is not.
   A `Key` carries its `Visibility`, and `dashboard_asset` is the only constructor that produces a
   public one, so a store implementation cannot write a data object into the public prefix by
-  accident.
+  accident. `KeySpace::public_prefix` exposes that same prefix to the bucket's IAM grant, so the
+  `allUsers` binding and the keys it is meant to cover cannot drift apart.
 
 ## Public surface
 

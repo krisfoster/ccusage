@@ -10,7 +10,8 @@ pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectStoreError {
-    /// A precondition failed (HTTP 412). The object changed under us.
+    /// A precondition failed (412), or the resource already exists (409). Either way the
+    /// caller's view is stale, and only a re-read can resolve it.
     Conflict {
         key: String,
     },
@@ -85,7 +86,7 @@ impl ObjectStoreError {
             404 => Self::NotFound {
                 key: key.to_string(),
             },
-            412 => Self::Conflict {
+            409 | 412 => Self::Conflict {
                 key: key.to_string(),
             },
             429 => Self::RateLimited {
