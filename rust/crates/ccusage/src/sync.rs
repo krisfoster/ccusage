@@ -7,6 +7,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod bucket;
 pub(crate) mod doctor;
 pub(crate) mod machine;
+pub(crate) mod maintenance;
 pub(crate) mod project;
 pub(crate) mod rollups;
 pub(crate) mod run;
@@ -54,11 +55,53 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
         SyncCommand::Setup(setup) => setup_sync(&setup, &config, args.config),
         SyncCommand::Status => show_status(&config, args.json),
         SyncCommand::Doctor => run_doctor(&config, args.json),
+        SyncCommand::Repair(repair) => maintenance::execute_repair(&config, &repair),
+        SyncCommand::Forget(forget) => maintenance::execute_forget(&config, &forget),
+        SyncCommand::MergeMachine(merge) => maintenance::execute_merge(&config, &merge),
         other => Err(cli_error(format!(
             "`ccusage sync {}` is not available yet; it arrives in a later release.",
             other.name()
         ))),
     }
+}
+
+/// A configured bucket, opened, with the identity this machine syncs as.
+pub(crate) struct Session {
+    pub store: GcsStore,
+    pub keys: KeySpace,
+    pub user_id: String,
+    pub machine_id: String,
+}
+
+/// Resolves config and credentials into something that can talk to the bucket.
+///
+/// Every command past setup needs the same four values, and each one deciding
+/// for itself how to fall back on a bad prefix is how two commands end up
+/// reading different keys in the same bucket.
+pub(crate) fn connect(config: &ConfigContext) -> Result<Session> {
+    let status = status::Status::from_config(config.sync());
+    let (Some(bucket), Some(machine_id), Some(user_id)) = (
+        status.bucket.clone(),
+        status.machine_id.clone(),
+        status.user_id.clone(),
+    ) else {
+        return Err(cli_error(
+            "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
+        ));
+    };
+    let keys = KeySpace::new(status.prefix.as_str().trim_end_matches('/'))
+        .or_else(|_| KeySpace::new(DEFAULT_PREFIX))
+        .map_err(|error| cli_error(error.to_string()))?;
+    let credentials = Arc::new(
+        auth::resolve(config_auth_mode(config), true, &mut auth::TerminalPrompt)
+            .map_err(|error| cli_error(error.to_string()))?,
+    );
+    Ok(Session {
+        store: GcsStore::new(&bucket, Box::new(credentials)),
+        keys,
+        user_id,
+        machine_id,
+    })
 }
 
 fn show_status(config: &ConfigContext, json: bool) -> Result<()> {

@@ -10,17 +10,14 @@ use ccusage_config::ConfigContext;
 use ccusage_core::LoadedEntry;
 use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, UtcDate};
 use ccusage_sync::{FoldContext, FoldEntry, Salt, Shard, fold, is_finalized};
-use std::sync::Arc;
 
 use super::machine::{self, IndexEntry, MachineIndex};
-use super::{DEFAULT_PREFIX, config_auth_mode, now_ms};
+use super::now_ms;
 use crate::{
     Result,
     cli::{SharedArgs, SyncRunArgs},
-    cli_error, format_rfc3339_millis,
-    gcs::GcsStore,
-    load_entries,
-    sync::{auth, rollups, status},
+    cli_error, format_rfc3339_millis, load_entries,
+    sync::rollups,
 };
 
 /// The agent this build syncs. Shards are keyed by agent, so adding another is
@@ -196,20 +193,13 @@ fn to_fold_entries(entries: &[LoadedEntry]) -> Vec<FoldEntry> {
 }
 
 pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> {
-    let status = status::Status::from_config(config.sync());
-    let (Some(bucket), Some(machine_id), Some(user_id)) = (
-        status.bucket.clone(),
-        status.machine_id.clone(),
-        status.user_id.clone(),
-    ) else {
-        return Err(cli_error(
-            "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
-        ));
-    };
     let salt = configured_salt(config)?;
-    let keys = KeySpace::new(status.prefix.as_str().trim_end_matches('/'))
-        .or_else(|_| KeySpace::new(DEFAULT_PREFIX))
-        .map_err(|error| cli_error(error.to_string()))?;
+    let super::Session {
+        store,
+        keys,
+        user_id,
+        machine_id,
+    } = super::connect(config)?;
 
     let entries = load_entries(&SharedArgs::with_defaults(), None)?;
     let context = FoldContext {
@@ -228,11 +218,6 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     };
     let shards = fold(&to_fold_entries(&entries), &context);
 
-    let credentials = Arc::new(
-        auth::resolve(config_auth_mode(config), true, &mut auth::TerminalPrompt)
-            .map_err(|error| cli_error(error.to_string()))?,
-    );
-    let store = GcsStore::new(&bucket, Box::new(Arc::clone(&credentials)));
     let index = machine::load_index(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
     let plan = plan_uploads(shards, &index, AGENT);
 

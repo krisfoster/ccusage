@@ -176,6 +176,52 @@ pub(crate) fn register_machine(
     )
 }
 
+/// Removes a machine from the roster, with the same merge-on-conflict rules
+/// registering uses: a lost race must not resurrect it or drop a sibling.
+pub(crate) fn unregister_machine(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    machine_id: &str,
+) -> Result<()> {
+    let key = keys.manifest();
+    for _ in 0..MAX_ATTEMPTS {
+        let Some((body, meta)) = store.get(&key).map_err(|error| error.to_string())? else {
+            return Ok(());
+        };
+        let mut document: Value = serde_json::from_slice(&body)
+            .map_err(|error| format!("{} is not readable JSON: {error}", key.path()))?;
+        let machines: Vec<String> = document
+            .get("machines")
+            .and_then(Value::as_array)
+            .map(|machines| {
+                machines
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|entry| *entry != machine_id)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        document["machines"] = json!(machines);
+
+        let precondition = match meta.generation {
+            Some(generation) => Precondition::IfGenerationMatch(generation),
+            None => Precondition::None,
+        };
+        match store.put(
+            &key,
+            document.to_string().as_bytes(),
+            "application/json",
+            &precondition,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("the bucket manifest kept changing while removing this machine; try again.".to_string())
+}
+
 fn read_field(
     store: &dyn ObjectStore,
     key: &ccusage_objectstore::Key,

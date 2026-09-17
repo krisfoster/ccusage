@@ -239,9 +239,42 @@ impl KeySpace {
         })
     }
 
+    /// A key for an object a listing returned.
+    ///
+    /// Deleting what a listing found needs a `Key`, and inventing one from an
+    /// arbitrary string would be a hole in the public/private invariant, so
+    /// the path is checked to be inside this key space and its visibility is
+    /// derived rather than asserted.
+    pub fn listed(&self, path: &str) -> Result<Key> {
+        let Some(relative) = path.strip_prefix(&format!("{}/", self.prefix)) else {
+            return Err(ObjectStoreError::InvalidKey {
+                key: path.to_string(),
+                reason: format!("is not under the '{}' prefix", self.prefix),
+            });
+        };
+        let visibility = if relative.starts_with(&format!("{DASHBOARD_SEGMENT}/")) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        Ok(Key {
+            path: path.to_string(),
+            visibility,
+        })
+    }
+
     pub fn probe(&self, machine_id: &str) -> Result<Key> {
         validate_segment(machine_id, "machineId")?;
         Ok(self.private(&format!(".probe/{machine_id}")))
+    }
+
+    /// Everything every machine of this user has written.
+    ///
+    /// Listing is how repair rediscovers machines the manifest lost, so it has
+    /// to be reachable without knowing a machine id first.
+    pub fn machines_prefix(&self, user_id: &str) -> Result<String> {
+        validate_segment(user_id, "userId")?;
+        Ok(format!("{}/users/{user_id}/machines/", self.prefix))
     }
 
     pub fn machine_prefix(&self, user_id: &str, machine_id: &str) -> Result<String> {
