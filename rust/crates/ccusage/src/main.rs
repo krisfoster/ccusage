@@ -5,6 +5,7 @@ mod commands;
 mod credentials;
 mod gcs;
 mod http;
+mod sync;
 
 pub(crate) use adapter::claude::{load_daily_summaries, load_entries};
 #[cfg(test)]
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
         Some(Command::OpenClaw(args)) => adapter::openclaw::run(args),
         Some(Command::Grok(args)) => adapter::grok::run(args),
         Some(Command::ZCode(args)) => adapter::zcode::run(args),
+        Some(Command::Sync(args)) => sync::run(args),
         None => {
             let args = AgentCommandArgs {
                 shared: cli.shared,

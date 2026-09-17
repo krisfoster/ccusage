@@ -53,7 +53,9 @@ fn window_target(cli: &mut Cli) -> Option<(&mut SharedArgs, PeriodUnit, WeekDay)
             | Command::Grok(args)
             | Command::ZCode(args),
         ) => agent_window_target(args),
-        Some(Command::Session(_) | Command::Blocks(_) | Command::Statusline(_)) => None,
+        Some(
+            Command::Session(_) | Command::Blocks(_) | Command::Statusline(_) | Command::Sync(_),
+        ) => None,
     }
 }
 

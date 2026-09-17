@@ -1,0 +1,21 @@
+---
+source: crates/ccusage-cli-parser/src/tests.rs
+expression: "help_text_for_args(&[\"ccusage\".to_string(), \"sync\".to_string(),\n\"setup\".to_string(),])"
+---
+Configure the bucket, credentials, and identity.
+
+USAGE:
+  ccusage sync setup <OPTIONS>
+
+OPTIONS:
+  --provider <provider>                Object storage provider (default: gcs, choices: gcs)
+  -p, --project <project>              Cloud project that owns the bucket (default: discovered)
+  --bucket <bucket>                    Bucket to sync into (default: created for you)
+  --location <location>                Location for a bucket ccusage creates (default: project default)
+  --prefix <prefix>                    Key prefix inside the bucket (default: ccusage/v1)
+  --auth <auth>                        Credential source to configure (default: auto, choices: auto | adc | hmac)
+  --non-interactive                    Never prompt; fail instead of asking a question (default: false)
+  --recreate                           Replace the configured bucket instead of reusing it (default: false)
+  -j, --json                           Output in JSON format (default: false)
+  --config <config>                    Path to configuration file (default: auto-discovery)
+  -h, --help                           Display this help message

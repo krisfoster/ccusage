@@ -208,6 +208,13 @@ fn command_snapshot(command: Option<Command>) -> Value {
         Some(Command::OpenClaw(args)) => agent_command_snapshot("openclaw", args),
         Some(Command::Grok(args)) => agent_command_snapshot("grok", args),
         Some(Command::ZCode(args)) => agent_command_snapshot("zcode", args),
+        Some(Command::Sync(args)) => json!({
+            "type": "sync",
+            "subcommand": args.command.name(),
+            "command": format!("{:?}", args.command),
+            "json": args.json,
+            "config": args.config.map(|path| path.to_string_lossy().into_owned()),
+        }),
     }
 }
 
@@ -1621,4 +1628,288 @@ fn preserves_configured_order_and_cli_precedence() {
         assert_eq!(report.shared.order, expected, "{config_json}");
         assert_eq!(report.shared.order_explicit, explicit, "{config_json}");
     }
+}
+
+fn sync_args(args: &[&str]) -> SyncArgs {
+    match parse(args).command {
+        Some(Command::Sync(args)) => args,
+        _ => panic!("expected sync command"),
+    }
+}
+
+#[test]
+fn bare_sync_runs_a_sync() {
+    let args = sync_args(&["ccusage", "sync"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Run(SyncRunArgs { dry_run: false })
+    );
+    assert!(!args.json);
+}
+
+#[test]
+fn sync_run_accepts_dry_run_without_naming_the_subcommand() {
+    let args = sync_args(&["ccusage", "sync", "--dry-run"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Run(SyncRunArgs { dry_run: true })
+    );
+}
+
+#[test]
+fn sync_json_and_config_apply_to_every_subcommand() {
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "status",
+        "--json",
+        "--config",
+        "/tmp/c.json",
+    ]);
+
+    assert_eq!(args.command, SyncCommand::Status);
+    assert!(args.json);
+    assert_eq!(
+        args.config.as_deref(),
+        Some(std::path::Path::new("/tmp/c.json"))
+    );
+}
+
+#[test]
+fn sync_setup_collects_the_full_target_description() {
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "setup",
+        "--provider",
+        "gcs",
+        "--project",
+        "my-project",
+        "--bucket",
+        "ccusage-abcd",
+        "--location",
+        "europe-west2",
+        "--prefix",
+        "ccusage/v1",
+        "--auth",
+        "hmac",
+        "--non-interactive",
+        "--recreate",
+    ]);
+
+    let SyncCommand::Setup(setup) = args.command else {
+        panic!("expected setup command");
+    };
+    assert_eq!(
+        *setup,
+        SyncSetupArgs {
+            provider: SyncProvider::Gcs,
+            project: Some("my-project".to_string()),
+            bucket: Some("ccusage-abcd".to_string()),
+            location: Some("europe-west2".to_string()),
+            prefix: Some("ccusage/v1".to_string()),
+            auth: SyncAuthMode::Hmac,
+            non_interactive: true,
+            recreate: true,
+        }
+    );
+}
+
+#[test]
+fn sync_setup_defaults_to_the_automatic_credential_ladder() {
+    let args = sync_args(&["ccusage", "sync", "setup"]);
+
+    let SyncCommand::Setup(setup) = args.command else {
+        panic!("expected setup command");
+    };
+    assert_eq!(setup.auth, SyncAuthMode::Auto);
+    assert_eq!(setup.provider, SyncProvider::Gcs);
+    assert!(!setup.non_interactive);
+}
+
+#[test]
+fn sync_setup_rejects_auth_modes_that_are_not_implemented() {
+    assert!(
+        parse_error(&["ccusage", "sync", "setup", "--auth", "oauth"])
+            .contains("gcloud auth application-default login")
+    );
+    assert!(
+        parse_error(&["ccusage", "sync", "setup", "--auth", "service-account"]).contains("hmac")
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "setup", "--auth", "nope"]),
+        "Invalid value for --auth 'nope'. Expected auto, adc, or hmac."
+    );
+}
+
+#[test]
+fn sync_setup_rejects_providers_other_than_gcs() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "setup", "--provider", "s3"]),
+        "Invalid value for --provider 's3'. Only 'gcs' is supported in this release."
+    );
+}
+
+#[test]
+fn sync_forget_requires_the_machine_it_deletes() {
+    let args = sync_args(&["ccusage", "sync", "forget", "laptop", "--yes"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Forget(SyncForgetArgs {
+            machine: "laptop".to_string(),
+            yes: true,
+        })
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "forget"]),
+        "The sync forget command requires a <machine> argument."
+    );
+}
+
+#[test]
+fn sync_merge_machine_requires_both_machines() {
+    let args = sync_args(&["ccusage", "sync", "merge-machine", "old", "new"]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::MergeMachine(SyncMergeMachineArgs {
+            from: "old".to_string(),
+            into: "new".to_string(),
+            yes: false,
+        })
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "merge-machine", "old"]),
+        "The sync merge-machine command requires a <into> argument."
+    );
+}
+
+#[test]
+fn sync_dashboard_share_links_default_to_a_day() {
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "dashboard",
+        "--deploy",
+        "--share",
+        "--open",
+    ]);
+
+    assert_eq!(
+        args.command,
+        SyncCommand::Dashboard(SyncDashboardArgs {
+            deploy: true,
+            share: true,
+            open: true,
+            share_ttl_seconds: DEFAULT_SHARE_TTL_SECONDS,
+        })
+    );
+}
+
+#[test]
+fn sync_dashboard_accepts_duration_suffixes_for_the_share_ttl() {
+    for (value, expected) in [("90s", 90), ("30m", 1800), ("12h", 43_200), ("7d", 604_800)] {
+        let args = sync_args(&["ccusage", "sync", "dashboard", "--share", "--ttl", value]);
+        assert_eq!(
+            args.command,
+            SyncCommand::Dashboard(SyncDashboardArgs {
+                deploy: false,
+                share: true,
+                open: false,
+                share_ttl_seconds: expected,
+            }),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn sync_dashboard_rejects_share_ttls_a_signature_cannot_carry() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "dashboard", "--share", "--ttl", "8d"]),
+        "Invalid value for --ttl '8d'. A signed link cannot last longer than 7d."
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "dashboard", "--share", "--ttl", "0h"]),
+        "Invalid value for --ttl '0h'. Expected a duration like 30m, 24h, or 7d."
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "dashboard", "--share", "--ttl", "soon"]),
+        "Invalid value for --ttl 'soon'. Expected a duration like 30m, 24h, or 7d."
+    );
+}
+
+#[test]
+fn sync_dashboard_ttl_without_share_is_an_error() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "dashboard", "--ttl", "1h"]),
+        "The --ttl option only applies to --share."
+    );
+}
+
+#[test]
+fn sync_rejects_unknown_subcommands_and_options() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "upload"]),
+        "Unknown sync command 'upload'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "status", "--force"]),
+        "Unknown sync status option '--force'"
+    );
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "--force"]),
+        "Unknown sync run option '--force'"
+    );
+}
+
+#[test]
+fn sync_options_must_follow_the_subcommand() {
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "--json", "status"]),
+        "Unexpected argument 'status'. Options come after the sync subcommand, as in 'ccusage sync status --json'."
+    );
+}
+
+#[test]
+fn report_window_options_do_not_apply_to_sync() {
+    assert_eq!(
+        parse_error(&["ccusage", "--last", "3", "sync", "status"]),
+        "The --last option is only available for the daily, weekly, and monthly reports."
+    );
+}
+
+#[test]
+fn contextual_sync_help_lists_subcommands_and_setup_options() {
+    let help = help_text_for_args(&["ccusage".to_string(), "sync".to_string()]);
+    assert!(help.contains("USAGE:\n  ccusage sync <COMMANDS>"));
+    assert!(help.contains("setup"));
+    assert!(help.contains("ccusage sync doctor --help"));
+
+    let setup = help_text_for_args(&[
+        "ccusage".to_string(),
+        "sync".to_string(),
+        "setup".to_string(),
+    ]);
+    assert!(setup.contains("--bucket"));
+    assert!(setup.contains("choices: auto | adc | hmac"));
+}
+
+#[test]
+fn snapshots_sync_help_text() {
+    insta::assert_snapshot!(
+        "sync_help",
+        help_text_for_args(&["ccusage".to_string(), "sync".to_string()])
+    );
+    insta::assert_snapshot!(
+        "sync_setup_help",
+        help_text_for_args(&[
+            "ccusage".to_string(),
+            "sync".to_string(),
+            "setup".to_string(),
+        ])
+    );
 }

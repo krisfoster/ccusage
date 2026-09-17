@@ -28,6 +28,119 @@ pub enum Command {
     OpenClaw(AgentCommandArgs),
     Grok(AgentCommandArgs),
     ZCode(AgentCommandArgs),
+    Sync(SyncArgs),
+}
+
+/// Options every `sync` subcommand accepts, plus the subcommand itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncArgs {
+    pub json: bool,
+    pub config: Option<PathBuf>,
+    pub command: SyncCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SyncCommand {
+    Run(SyncRunArgs),
+    Setup(Box<SyncSetupArgs>),
+    Status,
+    Doctor,
+    Repair(SyncRepairArgs),
+    Forget(SyncForgetArgs),
+    MergeMachine(SyncMergeMachineArgs),
+    Dashboard(SyncDashboardArgs),
+}
+
+impl SyncCommand {
+    /// The subcommand name as it is spelled on the command line.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Run(_) => "run",
+            Self::Setup(_) => "setup",
+            Self::Status => "status",
+            Self::Doctor => "doctor",
+            Self::Repair(_) => "repair",
+            Self::Forget(_) => "forget",
+            Self::MergeMachine(_) => "merge-machine",
+            Self::Dashboard(_) => "dashboard",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncRunArgs {
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncSetupArgs {
+    pub provider: SyncProvider,
+    pub project: Option<String>,
+    pub bucket: Option<String>,
+    pub location: Option<String>,
+    pub prefix: Option<String>,
+    pub auth: SyncAuthMode,
+    pub non_interactive: bool,
+    /// Allows replacing an already configured bucket, which setup otherwise refuses to do.
+    pub recreate: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncRepairArgs {
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncForgetArgs {
+    pub machine: String,
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncMergeMachineArgs {
+    pub from: String,
+    pub into: String,
+    pub yes: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SyncDashboardArgs {
+    pub deploy: bool,
+    pub share: bool,
+    pub open: bool,
+    pub share_ttl_seconds: u64,
+}
+
+impl Default for SyncDashboardArgs {
+    fn default() -> Self {
+        Self {
+            deploy: false,
+            share: false,
+            open: false,
+            share_ttl_seconds: DEFAULT_SHARE_TTL_SECONDS,
+        }
+    }
+}
+
+/// Signed share links expire; a day is long enough to send someone a link and short
+/// enough that a leaked link stops working.
+pub const DEFAULT_SHARE_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+/// The longest expiry a V4 signature can carry.
+pub const MAX_SHARE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SyncProvider {
+    #[default]
+    Gcs,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SyncAuthMode {
+    #[default]
+    Auto,
+    Adc,
+    Hmac,
 }
 
 #[derive(Clone, Debug, Default)]
