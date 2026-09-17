@@ -3,9 +3,9 @@
 Cloud sync copies your local usage totals into an object storage bucket you own,
 so several machines can contribute to one view of your spend.
 
-This page covers setup only. Uploading (`ccusage sync run`) and the dashboard
-arrive in later releases; `ccusage sync setup`, `ccusage sync status`, and
-`ccusage sync doctor` work today.
+`ccusage sync setup`, `ccusage sync run`, `ccusage sync status`, and
+`ccusage sync doctor` work today. `run` uploads Claude Code usage; the other
+agents and the dashboard arrive in later releases.
 
 ::: warning Google Cloud Storage only
 `--provider gcs` is the only provider so far. The storage layer is
@@ -132,6 +132,23 @@ world-readable. It exits non-zero if any check fails.
 ```bash
 ccusage sync doctor --json
 ```
+
+## Uploading
+
+```bash
+ccusage sync run
+ccusage sync run --dry-run
+```
+
+`run` folds your local usage into one object per UTC day and uploads only the
+days whose contents changed, so a run that finds nothing new writes nothing.
+Days are stored under this machine's own prefix, so two machines never overwrite
+each other's data and a day you sync from a laptop stays intact when a desktop
+syncs the same day.
+
+Uploaded days hold token counts, costs, and 15-minute activity buckets. Project
+paths are hashed with your bucket's salt before upload, and prompts, file
+contents, and file paths are never uploaded.
 
 ## Privacy
 
