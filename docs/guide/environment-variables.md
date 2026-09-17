@@ -130,6 +130,34 @@ export CCUSAGE_OFFLINE=1
 ccusage daily  # Runs in offline mode
 ```
 
+### CCUSAGE_SYNC_ACCESS_TOKEN
+
+An OAuth access token for [cloud sync](/guide/cloud-sync). Highest priority in the
+credential ladder, and useful in CI where `gcloud` is not installed:
+
+```bash
+export CCUSAGE_SYNC_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+ccusage sync status
+```
+
+### CCUSAGE_SYNC_HMAC_ACCESS_ID / CCUSAGE_SYNC_HMAC_SECRET
+
+A Cloud Storage HMAC key pair, used when both are set. Keep the secret out of
+shell history and out of your configuration file — ccusage never writes
+credentials there:
+
+```bash
+export CCUSAGE_SYNC_HMAC_ACCESS_ID="GOOG1E..."
+export CCUSAGE_SYNC_HMAC_SECRET="..."
+ccusage sync setup --auth hmac
+```
+
+### GOOGLE_APPLICATION_CREDENTIALS
+
+Path to an Application Default Credentials file for cloud sync. ccusage accepts
+authorized-user credentials; service account keys are rejected rather than
+partly supported.
+
 ### NO_COLOR
 
 Disable colored output (standard CLI convention):

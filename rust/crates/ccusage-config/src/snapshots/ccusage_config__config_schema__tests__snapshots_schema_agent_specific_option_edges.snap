@@ -1367,6 +1367,7 @@ expression: "json!({\n    \"rootRef\": schema[\"$ref\"], \"rootProperties\":\n  
     "opencode",
     "pi",
     "qwen",
+    "sync",
     "zcode"
   ],
   "rootRef": "#/definitions/ccusage-config",

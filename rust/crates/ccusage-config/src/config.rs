@@ -8,15 +8,16 @@ use serde_json::{Map, Value};
 
 use ccusage_cli::{
     BlocksArgs, CodexSpeed, CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, NamedPiStore,
-    PricingOverride, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate, WeekDay, WeeklyArgs,
-    normalize_date_bound,
+    PricingOverride, SharedArgs, SortOrder, StatuslineArgs, SyncAuthMode, SyncProvider,
+    SyncSetupArgs, VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::config_schema::{
     BlocksSpecificOptions, CodexOptions, ConfigCodexSpeed, ConfigCostMode, ConfigCostSource,
-    ConfigPricingOverride, ConfigSortOrder, ConfigVisualBurnRate, ConfigWeekDay,
-    DailySpecificOptions, NAMED_PI_STORE_NAME_PATTERN, OpenClawOptions, PiOptions, SharedOptions,
-    StatuslineSpecificOptions, WeeklySpecificOptions,
+    ConfigPricingOverride, ConfigSortOrder, ConfigSyncAuthKind, ConfigSyncProvider,
+    ConfigVisualBurnRate, ConfigWeekDay, DailySpecificOptions, NAMED_PI_STORE_NAME_PATTERN,
+    OpenClawOptions, PiOptions, SharedOptions, StatuslineSpecificOptions, SyncConfig,
+    WeeklySpecificOptions,
 };
 
 struct ConfigCommand {
@@ -31,6 +32,8 @@ pub struct ConfigContext {
     pi_stores: Vec<NamedPiStore>,
     pi_store_error: Option<String>,
     date_bound_error: Option<String>,
+    sync: Option<SyncConfig>,
+    sync_error: Option<String>,
 }
 
 impl ConfigContext {
@@ -43,15 +46,41 @@ impl ConfigContext {
             .transpose()
             .map(|stores| (stores.unwrap_or_default(), None))
             .unwrap_or_else(|error| (Vec::new(), Some(error)));
+        let (sync, sync_error) = value
+            .as_ref()
+            .map(parse_sync_config)
+            .transpose()
+            .map(|sync| (sync.flatten(), None))
+            .unwrap_or_else(|error| (None, Some(error)));
         let mut context = Self {
             value,
             command,
             pi_stores,
             pi_store_error,
             date_bound_error: None,
+            sync,
+            sync_error,
         };
         context.date_bound_error = context.detect_date_bound_error();
         context
+    }
+
+    /// Settings the sync commands read. Absent until `ccusage sync setup` writes
+    /// the block, so callers treat `None` as "sync is not configured".
+    pub fn sync(&self) -> Option<&SyncConfig> {
+        self.sync.as_ref()
+    }
+
+    /// A malformed `sync` block only breaks the sync commands, so reports keep
+    /// working next to one.
+    fn active_sync_error(&self) -> Option<&str> {
+        self.command_is_sync()
+            .then_some(self.sync_error.as_deref())
+            .flatten()
+    }
+
+    fn command_is_sync(&self) -> bool {
+        self.command.agent.is_none() && self.command.report == "sync"
     }
 
     /// Named pi stores only reach commands that read them, so their parse error
@@ -195,6 +224,86 @@ fn parse_named_pi_stores(value: &Value) -> std::result::Result<Vec<NamedPiStore>
     Ok(parsed)
 }
 
+/// Credentials belong in the environment or in gcloud, never in a file that gets
+/// committed or synced between machines, so a secret-looking key is rejected
+/// outright rather than quietly honored.
+fn parse_sync_config(value: &Value) -> std::result::Result<Option<SyncConfig>, String> {
+    let Some(sync) = value.get("sync") else {
+        return Ok(None);
+    };
+    let Some(object) = sync.as_object() else {
+        return Err(config_error("sync must be an object"));
+    };
+    let nested = object
+        .iter()
+        .filter_map(|(key, value)| Some((key, value.as_object()?)))
+        .flat_map(|(parent, child)| {
+            child
+                .keys()
+                .map(move |key| (format!("{parent}.{key}"), key.as_str()))
+        });
+    if let Some((path, _)) = object
+        .keys()
+        .map(|key| (key.clone(), key.as_str()))
+        .chain(nested)
+        .find(|(_, key)| is_secret_key(key))
+    {
+        return Err(config_error(format!(
+            "sync.{path} must not be stored in the config file. Supply credentials through the environment or 'gcloud auth application-default login'"
+        )));
+    }
+    validate_sync_choice(object.get("provider"), "sync.provider", &["gcs"])?;
+    validate_sync_choice(
+        object
+            .get("auth")
+            .and_then(Value::as_object)
+            .and_then(|auth| auth.get("kind")),
+        "sync.auth.kind",
+        &["auto", "adc", "hmac"],
+    )?;
+    serde_json::from_value(sync.clone())
+        .map(Some)
+        .map_err(|error| config_error(format!("sync: {error}")))
+}
+
+fn validate_sync_choice(
+    value: Option<&Value>,
+    path: &str,
+    allowed: &[&str],
+) -> std::result::Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let expected = allowed.join("', '");
+    let Some(text) = value.as_str() else {
+        return Err(config_error(format!(
+            "{path} must be a string. Expected '{expected}'"
+        )));
+    };
+    if allowed.contains(&text) {
+        return Ok(());
+    }
+    Err(config_error(format!(
+        "{path} '{text}' is not supported. Expected '{expected}'"
+    )))
+}
+
+fn is_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "secret",
+        "token",
+        "password",
+        "passphrase",
+        "credential",
+        "privatekey",
+        "accesskey",
+        "apikey",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
 fn config_error(message: impl Into<String>) -> String {
     format!("Invalid ccusage config: {}", message.into())
 }
@@ -253,6 +362,12 @@ fn load_config_value(path: Option<&Path>) -> Option<Value> {
         .filter_map(|path| fs::read_to_string(path).ok())
         .filter_map(|content| serde_json::from_str::<Value>(&content).ok())
         .find(|value| value.as_object().is_some())
+}
+
+/// The same search order the loader uses, so setup writes back to the file a later
+/// run will actually read.
+pub fn discovered_config_paths() -> Vec<PathBuf> {
+    discover_config_paths()
 }
 
 fn discover_config_paths() -> Vec<PathBuf> {
@@ -531,6 +646,7 @@ fn apply_config_to_agent_args(
 impl ccusage_cli::CliConfig for ConfigContext {
     fn config_error(&self) -> Option<&str> {
         self.active_pi_store_error()
+            .or(self.active_sync_error())
             .or(self.date_bound_error.as_deref())
     }
 
@@ -552,6 +668,30 @@ impl ccusage_cli::CliConfig for ConfigContext {
 
     fn apply_statusline_args(&self, args: &mut StatuslineArgs) {
         apply_config_to_statusline_args(args, self);
+    }
+
+    fn apply_sync_setup_args(&self, args: &mut SyncSetupArgs) {
+        let Some(sync) = self.sync.as_ref() else {
+            return;
+        };
+        if let Some(provider) = sync.provider {
+            args.provider = provider.into();
+        }
+        if let Some(project) = sync.project_id.clone() {
+            args.project = Some(project);
+        }
+        if let Some(bucket) = sync.bucket.clone() {
+            args.bucket = Some(bucket);
+        }
+        if let Some(location) = sync.location.clone() {
+            args.location = Some(location);
+        }
+        if let Some(prefix) = sync.prefix.clone() {
+            args.prefix = Some(prefix);
+        }
+        if let Some(kind) = sync.auth.as_ref().and_then(|auth| auth.kind) {
+            args.auth = kind.into();
+        }
     }
 
     fn apply_agent_args(
@@ -696,6 +836,24 @@ impl From<ConfigPricingOverride> for PricingOverride {
     }
 }
 
+impl From<ConfigSyncProvider> for SyncProvider {
+    fn from(provider: ConfigSyncProvider) -> Self {
+        match provider {
+            ConfigSyncProvider::Gcs => Self::Gcs,
+        }
+    }
+}
+
+impl From<ConfigSyncAuthKind> for SyncAuthMode {
+    fn from(kind: ConfigSyncAuthKind) -> Self {
+        match kind {
+            ConfigSyncAuthKind::Auto => Self::Auto,
+            ConfigSyncAuthKind::Adc => Self::Adc,
+            ConfigSyncAuthKind::Hmac => Self::Hmac,
+        }
+    }
+}
+
 impl From<ConfigCostMode> for CostMode {
     fn from(value: ConfigCostMode) -> Self {
         match value {
@@ -767,8 +925,8 @@ mod tests {
 
     use super::*;
     use ccusage_cli::{
-        BlocksArgs, CliConfig, CodexSpeed, CostMode, SortOrder, StatuslineArgs, VisualBurnRate,
-        WeekDay, WeeklyArgs,
+        BlocksArgs, CliConfig, CodexSpeed, CostMode, SortOrder, StatuslineArgs, SyncAuthMode,
+        SyncProvider, SyncSetupArgs, VisualBurnRate, WeekDay, WeeklyArgs,
     };
     use ccusage_core::DEFAULT_SESSION_DURATION_HOURS;
     use ccusage_test_support::fs_fixture;
@@ -1338,6 +1496,110 @@ mod tests {
         assert_eq!(shared.until.as_deref(), Some("20260131"));
     }
 
+    #[test]
+    fn applies_sync_config_to_setup_args() {
+        let config = config_context_for_command(
+            r#"{
+                "sync": {
+                    "provider": "gcs",
+                    "projectId": "my-project",
+                    "bucket": "ccusage-9f3a",
+                    "location": "europe-west2",
+                    "prefix": "ccusage/v1",
+                    "auth": { "kind": "adc" }
+                }
+            }"#,
+            &["sync", "setup"],
+        );
+        let mut args = SyncSetupArgs::default();
+
+        config.apply_sync_setup_args(&mut args);
+
+        assert_eq!(config.config_error(), None);
+        assert_eq!(args.provider, SyncProvider::Gcs);
+        assert_eq!(args.project.as_deref(), Some("my-project"));
+        assert_eq!(args.bucket.as_deref(), Some("ccusage-9f3a"));
+        assert_eq!(args.location.as_deref(), Some("europe-west2"));
+        assert_eq!(args.prefix.as_deref(), Some("ccusage/v1"));
+        assert_eq!(args.auth, SyncAuthMode::Adc);
+    }
+
+    #[test]
+    fn exposes_the_sync_identity_and_dashboard_settings() {
+        let config = config_context_for_command(
+            r#"{
+                "sync": {
+                    "machineId": "9f3a1c2b",
+                    "machineLabel": "laptop-work",
+                    "userId": "7q4d",
+                    "agents": ["claude", "codex"],
+                    "redactProjects": true,
+                    "dashboard": { "deploy": true, "public": true, "encrypt": false }
+                }
+            }"#,
+            &["sync", "status"],
+        );
+
+        let sync = config.sync().expect("sync block");
+        assert_eq!(sync.machine_id.as_deref(), Some("9f3a1c2b"));
+        assert_eq!(sync.machine_label.as_deref(), Some("laptop-work"));
+        assert_eq!(sync.user_id.as_deref(), Some("7q4d"));
+        assert_eq!(
+            sync.agents.as_deref(),
+            Some(["claude".to_string(), "codex".to_string()].as_slice())
+        );
+        assert_eq!(sync.redact_projects, Some(true));
+        let dashboard = sync.dashboard.as_ref().expect("dashboard block");
+        assert_eq!(dashboard.deploy, Some(true));
+        assert_eq!(dashboard.public, Some(true));
+        assert_eq!(dashboard.encrypt, Some(false));
+    }
+
+    #[test]
+    fn rejects_credentials_stored_in_the_sync_config() {
+        for raw in [
+            r#"{ "sync": { "hmacSecret": "abc" } }"#,
+            r#"{ "sync": { "auth": { "kind": "hmac", "accessToken": "abc" } } }"#,
+        ] {
+            let error = config_context_for_command(raw, &["sync", "run"])
+                .config_error()
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                error.contains("must not be stored in the config file"),
+                "{raw}: {error}"
+            );
+            assert!(!error.contains("abc"), "{raw}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_sync_values() {
+        let error =
+            config_context_for_command(r#"{ "sync": { "provider": "s3" } }"#, &["sync", "setup"])
+                .config_error()
+                .unwrap_or_default()
+                .to_string();
+
+        assert!(error.contains("sync"), "{error}");
+        assert!(error.contains("provider"), "{error}");
+    }
+
+    #[test]
+    fn keeps_sync_config_errors_gated_to_sync_commands() {
+        let raw = r#"{ "sync": { "provider": "s3" } }"#;
+
+        assert_eq!(
+            config_context_for_command(raw, &["daily"]).config_error(),
+            None
+        );
+        assert!(
+            config_context_for_command(raw, &["sync", "doctor"])
+                .config_error()
+                .is_some()
+        );
+    }
+
     fn context(value: Value, raw: &str, agent: Option<&str>, report: &str) -> ConfigContext {
         ConfigContext {
             value: Some(value),
@@ -1349,6 +1611,8 @@ mod tests {
             pi_stores: Vec::new(),
             pi_store_error: None,
             date_bound_error: None,
+            sync: None,
+            sync_error: None,
         }
     }
 

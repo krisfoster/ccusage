@@ -1,0 +1,28 @@
+---
+source: crates/ccusage-cli-parser/src/tests.rs
+expression: "help_text_for_args(&[\"ccusage\".to_string(), \"sync\".to_string()])"
+---
+Sync usage to a cloud storage bucket and publish the dashboard.
+
+USAGE:
+  ccusage sync <COMMANDS>
+
+COMMANDS:
+  run           Merge local usage into the bucket (the default)
+  setup         Configure the bucket, credentials, and identity
+  status        Show the resolved target, identity, and last sync
+  doctor        Check credentials, bucket access, and clock skew
+  repair        Rebuild the indexes and rollups from the shards
+  forget        Delete one machine's data from the bucket
+  merge-machine Move one machine's data under another machine id
+  dashboard     Deploy the dashboard or mint a shareable link
+
+For more info, run any command with the `--help` flag:
+  ccusage sync run --help
+  ccusage sync setup --help
+  ccusage sync status --help
+  ccusage sync doctor --help
+  ccusage sync repair --help
+  ccusage sync forget --help
+  ccusage sync merge-machine --help
+  ccusage sync dashboard --help

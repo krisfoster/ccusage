@@ -4,8 +4,10 @@ use crate::arg_parser::ArgParser;
 use crate::help::{print_help_and_exit, print_version_and_exit};
 use ccusage_cli::{
     AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexSpeed, Command, CostMode,
-    CostSource, DATE_BOUND_FORMATS, DailyArgs, OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS,
-    SessionArgs, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate, WeekDay, WeeklyArgs,
+    CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS, OPENCODE_AGENT_REPORTS,
+    STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder, StatuslineArgs, SyncArgs,
+    SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs, SyncMergeMachineArgs,
+    SyncProvider, SyncRepairArgs, SyncRunArgs, SyncSetupArgs, VisualBurnRate, WeekDay, WeeklyArgs,
     normalize_date_bound,
 };
 
@@ -358,8 +360,241 @@ fn parse_command(
             STANDARD_AGENT_REPORTS,
             Command::ZCode,
         ),
+        "sync" => parse_sync_command(parser, config),
         _ => Err(format!("Unknown command '{command}'")),
     }
+}
+
+/// The whole `sync` grammar, including the subcommands whose behavior arrives in a
+/// later release: parsing them here keeps the help text and the "not available yet"
+/// message in one place instead of turning a documented command into a parse error.
+fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<Command, String> {
+    let subcommand = match parser.peek() {
+        Some(token) if !token.starts_with('-') => parser.next().unwrap_or_default(),
+        _ => "run".to_string(),
+    };
+    let mut json = false;
+    let mut config_path = None;
+    let command = match subcommand.as_str() {
+        "run" => {
+            let mut args = SyncRunArgs::default();
+            parse_sync_options(parser, "run", &mut json, &mut config_path, |flag, _| {
+                match flag {
+                    "--dry-run" => args.dry_run = true,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            SyncCommand::Run(args)
+        }
+        "setup" => {
+            let mut args = SyncSetupArgs::default();
+            config.apply_sync_setup_args(&mut args);
+            parse_sync_options(
+                parser,
+                "setup",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--provider" => {
+                            args.provider = parse_sync_provider(&parser.value_for("--provider")?)?
+                        }
+                        "-p" | "--project" => args.project = Some(parser.value_for("--project")?),
+                        "--bucket" => args.bucket = Some(parser.value_for("--bucket")?),
+                        "--location" => args.location = Some(parser.value_for("--location")?),
+                        "--prefix" => args.prefix = Some(parser.value_for("--prefix")?),
+                        "--auth" => args.auth = parse_sync_auth_mode(&parser.value_for("--auth")?)?,
+                        "--non-interactive" => args.non_interactive = true,
+                        "--recreate" => args.recreate = true,
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
+            SyncCommand::Setup(Box::new(args))
+        }
+        "status" => {
+            parse_sync_options(parser, "status", &mut json, &mut config_path, |_, _| {
+                Ok(false)
+            })?;
+            SyncCommand::Status
+        }
+        "doctor" => {
+            parse_sync_options(parser, "doctor", &mut json, &mut config_path, |_, _| {
+                Ok(false)
+            })?;
+            SyncCommand::Doctor
+        }
+        "repair" => {
+            let mut args = SyncRepairArgs::default();
+            parse_sync_options(parser, "repair", &mut json, &mut config_path, |flag, _| {
+                match flag {
+                    "--dry-run" => args.dry_run = true,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            SyncCommand::Repair(args)
+        }
+        "forget" => {
+            let machine = sync_positional(parser, "forget", "machine")?;
+            let mut yes = false;
+            parse_sync_options(parser, "forget", &mut json, &mut config_path, |flag, _| {
+                match flag {
+                    "-y" | "--yes" => yes = true,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            SyncCommand::Forget(SyncForgetArgs { machine, yes })
+        }
+        "merge-machine" => {
+            let from = sync_positional(parser, "merge-machine", "from")?;
+            let into = sync_positional(parser, "merge-machine", "into")?;
+            let mut yes = false;
+            parse_sync_options(
+                parser,
+                "merge-machine",
+                &mut json,
+                &mut config_path,
+                |flag, _| {
+                    match flag {
+                        "-y" | "--yes" => yes = true,
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
+            SyncCommand::MergeMachine(SyncMergeMachineArgs { from, into, yes })
+        }
+        "dashboard" => {
+            let mut args = SyncDashboardArgs::default();
+            let mut ttl = None;
+            parse_sync_options(
+                parser,
+                "dashboard",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--deploy" => args.deploy = true,
+                        "--share" => args.share = true,
+                        "--open" => args.open = true,
+                        "--ttl" => ttl = Some(parse_share_ttl(&parser.value_for("--ttl")?)?),
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
+            if let Some(ttl) = ttl {
+                if !args.share {
+                    return Err("The --ttl option only applies to --share.".to_string());
+                }
+                args.share_ttl_seconds = ttl;
+            }
+            SyncCommand::Dashboard(args)
+        }
+        other => return Err(format!("Unknown sync command '{other}'")),
+    };
+    Ok(Command::Sync(SyncArgs {
+        json,
+        config: config_path,
+        command,
+    }))
+}
+
+/// Reads the options of one `sync` subcommand, handling the two every subcommand
+/// shares and delegating the rest.
+fn parse_sync_options(
+    parser: &mut ArgParser,
+    subcommand: &str,
+    json: &mut bool,
+    config: &mut Option<PathBuf>,
+    mut parse_subcommand_arg: impl FnMut(&str, &mut ArgParser) -> Result<bool, String>,
+) -> Result<(), String> {
+    while let Some(token) = parser.peek() {
+        if !token.starts_with('-') {
+            return Err(format!(
+                "Unexpected argument '{token}'. Options come after the sync subcommand, as in 'ccusage sync status --json'."
+            ));
+        }
+        let flag = parser.next_flag()?;
+        match flag.as_str() {
+            "-j" | "--json" => *json = true,
+            "--config" => *config = Some(PathBuf::from(parser.value_for("--config")?)),
+            flag => {
+                if !parse_subcommand_arg(flag, parser)? {
+                    return Err(format!("Unknown sync {subcommand} option '{flag}'"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sync_positional(parser: &mut ArgParser, subcommand: &str, name: &str) -> Result<String, String> {
+    match parser.peek() {
+        Some(token) if !token.starts_with('-') => Ok(parser.next().unwrap_or_default()),
+        _ => Err(format!(
+            "The sync {subcommand} command requires a <{name}> argument."
+        )),
+    }
+}
+
+fn parse_sync_provider(value: &str) -> Result<SyncProvider, String> {
+    match value {
+        "gcs" => Ok(SyncProvider::Gcs),
+        _ => Err(format!(
+            "Invalid value for --provider '{value}'. Only 'gcs' is supported in this release."
+        )),
+    }
+}
+
+fn parse_sync_auth_mode(value: &str) -> Result<SyncAuthMode, String> {
+    match value {
+        "auto" => Ok(SyncAuthMode::Auto),
+        "adc" => Ok(SyncAuthMode::Adc),
+        "hmac" => Ok(SyncAuthMode::Hmac),
+        "oauth" => Err(
+            "Invalid value for --auth 'oauth'. ccusage has no browser sign-in of its own; use 'adc', which signs in through 'gcloud auth application-default login', or 'hmac'."
+                .to_string(),
+        ),
+        "service-account" => Err(
+            "Invalid value for --auth 'service-account'. Service account JSON keys are not supported; use 'adc' or 'hmac'."
+                .to_string(),
+        ),
+        _ => Err(format!(
+            "Invalid value for --auth '{value}'. Expected auto, adc, or hmac."
+        )),
+    }
+}
+
+/// A share link's lifetime, written the way people say it: `30m`, `24h`, `7d`.
+fn parse_share_ttl(value: &str) -> Result<u64, String> {
+    let malformed =
+        || format!("Invalid value for --ttl '{value}'. Expected a duration like 30m, 24h, or 7d.");
+    let unit = value.chars().last().ok_or_else(malformed)?;
+    let multiplier = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        _ => return Err(malformed()),
+    };
+    let amount = value[..value.len() - unit.len_utf8()]
+        .parse::<u64>()
+        .map_err(|_| malformed())?;
+    let seconds = amount.checked_mul(multiplier).ok_or_else(malformed)?;
+    if seconds == 0 {
+        return Err(malformed());
+    }
+    if seconds > MAX_SHARE_TTL_SECONDS {
+        return Err(format!(
+            "Invalid value for --ttl '{value}'. A signed link cannot last longer than 7d."
+        ));
+    }
+    Ok(seconds)
 }
 
 fn accepts_root_all_options(command: &str) -> bool {
@@ -794,6 +1029,7 @@ fn is_command(arg: &str) -> bool {
             | "qwen"
             | "grok"
             | "zcode"
+            | "sync"
     )
 }
 
@@ -932,6 +1168,12 @@ fn option_takes_value(arg: &str) -> bool {
             | "--pi-path"
             | "--open-claw-path"
             | "--sections"
+            | "--provider"
+            | "--bucket"
+            | "--location"
+            | "--prefix"
+            | "--auth"
+            | "--ttl"
     )
 }
 
@@ -1063,7 +1305,7 @@ fn report_shared<'a>(
         Some(Command::Weekly(args)) => (&args.shared, true),
         Some(Command::Session(args)) => (&args.shared, false),
         Some(Command::Blocks(args)) => (&args.shared, false),
-        Some(Command::Statusline(_)) => (root_shared, false),
+        Some(Command::Statusline(_) | Command::Sync(_)) => (root_shared, false),
         Some(
             Command::Codex(args)
             | Command::OpenCode(args)
@@ -1110,7 +1352,7 @@ fn last_option_error(command: Option<&Command>, root_shared: &SharedArgs) -> Opt
 /// orders them. A reversed window would otherwise load everything and print an
 /// empty report that looks like missing data.
 fn date_window_error(command: Option<&Command>, root_shared: &SharedArgs) -> Option<String> {
-    if matches!(command, Some(Command::Statusline(_))) {
+    if matches!(command, Some(Command::Statusline(_) | Command::Sync(_))) {
         return None;
     }
     let (shared, _) = report_shared(command, root_shared);

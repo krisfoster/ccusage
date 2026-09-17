@@ -12,7 +12,11 @@
 		"openclaw_combined_options": ["agent_options", "openclaw_options"],
 		"openclaw_period_options": ["agent_options", "openclaw_options", "last_options"],
 		"pi_combined_options": ["agent_options", "pi_options"],
-		"pi_period_options": ["agent_options", "pi_options", "last_options"]
+		"pi_period_options": ["agent_options", "pi_options", "last_options"],
+		"sync_dashboard_combined_options": ["sync_dashboard_options", "sync_options"],
+		"sync_forget_combined_options": ["sync_forget_options", "sync_options"],
+		"sync_run_combined_options": ["sync_run_options", "sync_options"],
+		"sync_setup_combined_options": ["sync_setup_options", "sync_options"]
 	},
 	"root": {
 		"usage": ["ccusage [daily] <OPTIONS>", "ccusage <COMMANDS>"],
@@ -112,6 +116,10 @@
 			{
 				"name": "zcode",
 				"description": "Show ZCode usage commands"
+			},
+			{
+				"name": "sync",
+				"description": "Sync usage to a cloud storage bucket and publish the dashboard"
 			}
 		]
 	},
@@ -857,6 +865,93 @@
 			"description": "Show ZCode usage grouped by session",
 			"usage": "ccusage zcode session <OPTIONS>",
 			"options": "agent_options"
+		},
+		{
+			"path": ["sync"],
+			"description": "Sync usage to a cloud storage bucket and publish the dashboard.",
+			"usage": "ccusage sync <COMMANDS>",
+			"commands": [
+				{
+					"name": "run",
+					"description": "Merge local usage into the bucket (the default)"
+				},
+				{
+					"name": "setup",
+					"description": "Configure the bucket, credentials, and identity"
+				},
+				{
+					"name": "status",
+					"description": "Show the resolved target, identity, and last sync"
+				},
+				{
+					"name": "doctor",
+					"description": "Check credentials, bucket access, and clock skew"
+				},
+				{
+					"name": "repair",
+					"description": "Rebuild the indexes and rollups from the shards"
+				},
+				{
+					"name": "forget",
+					"description": "Delete one machine's data from the bucket"
+				},
+				{
+					"name": "merge-machine",
+					"description": "Move one machine's data under another machine id"
+				},
+				{
+					"name": "dashboard",
+					"description": "Deploy the dashboard or mint a shareable link"
+				}
+			]
+		},
+		{
+			"path": ["sync", "run"],
+			"description": "Merge local usage into the bucket.",
+			"usage": "ccusage sync run <OPTIONS>",
+			"options": "sync_run_combined_options"
+		},
+		{
+			"path": ["sync", "setup"],
+			"description": "Configure the bucket, credentials, and identity.",
+			"usage": "ccusage sync setup <OPTIONS>",
+			"options": "sync_setup_combined_options"
+		},
+		{
+			"path": ["sync", "status"],
+			"description": "Show the resolved target, identity, and last sync.",
+			"usage": "ccusage sync status <OPTIONS>",
+			"options": "sync_options"
+		},
+		{
+			"path": ["sync", "doctor"],
+			"description": "Check credentials, bucket access, and clock skew.",
+			"usage": "ccusage sync doctor <OPTIONS>",
+			"options": "sync_options"
+		},
+		{
+			"path": ["sync", "repair"],
+			"description": "Rebuild the indexes and rollups from the shards.",
+			"usage": "ccusage sync repair <OPTIONS>",
+			"options": "sync_run_combined_options"
+		},
+		{
+			"path": ["sync", "forget"],
+			"description": "Delete one machine's data from the bucket.",
+			"usage": "ccusage sync forget <machine> <OPTIONS>",
+			"options": "sync_forget_combined_options"
+		},
+		{
+			"path": ["sync", "merge-machine"],
+			"description": "Move one machine's data under another machine id.",
+			"usage": "ccusage sync merge-machine <from> <into> <OPTIONS>",
+			"options": "sync_forget_combined_options"
+		},
+		{
+			"path": ["sync", "dashboard"],
+			"description": "Deploy the dashboard or mint a shareable link.",
+			"usage": "ccusage sync dashboard <OPTIONS>",
+			"options": "sync_dashboard_combined_options"
 		}
 	]
 }

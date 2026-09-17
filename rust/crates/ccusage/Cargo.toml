@@ -15,6 +15,7 @@ path = "src/main.rs"
 fetch-litellm-pricing = ["ccusage-core/fetch-litellm-pricing"]
 
 [dependencies]
+base64.workspace = true
 ccusage-adapter-all.workspace = true
 ccusage-adapter-amp.workspace = true
 ccusage-adapter-antigravity.workspace = true
@@ -39,6 +40,8 @@ ccusage-cli-parser.workspace = true
 ccusage-cli.workspace = true
 ccusage-config.workspace = true
 ccusage-core.workspace = true
+ccusage-objectstore.workspace = true
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
@@ -47,6 +50,7 @@ ureq.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+assert_fs.workspace = true
 ccusage-test-support.workspace = true
 insta.workspace = true
 sqlite.workspace = true

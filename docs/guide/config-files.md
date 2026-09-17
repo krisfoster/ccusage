@@ -404,6 +404,23 @@ ccusage daily --config ./my-config.json
 ccusage blocks --config /path/to/team-config.json
 ```
 
+## Cloud Sync Settings
+
+The top-level `sync` block records where usage is synced to. `ccusage sync setup` writes it for you, merging into whatever the file already contains; see [Cloud Sync Setup](/guide/cloud-sync). Credentials are never stored here.
+
+```json
+{
+	"$schema": "https://ccusage.com/config-schema.json",
+	"sync": {
+		"provider": "gcs",
+		"projectId": "my-project",
+		"bucket": "ccusage-9f3a1c2b4405",
+		"location": "US",
+		"prefix": "ccusage/v1"
+	}
+}
+```
+
 ## Pricing Overrides
 
 ccusage looks up token costs from a LiteLLM pricing snapshot embedded in the binary, optionally refreshed at runtime (or skipped with `--offline`). When a model is missing from LiteLLM (private deployments, internal wrappers like Pi's `[pi] gpt-5.4`, custom proxies), or when the snapshot price differs from your contract, set `pricingOverrides` under `defaults` to supply per-model values.

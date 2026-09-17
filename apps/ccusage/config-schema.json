@@ -13350,6 +13350,105 @@
 					},
 					"type": "object"
 				},
+				"sync": {
+					"additionalProperties": false,
+					"description": "Cloud sync configuration. Credentials never belong here; ccusage reads them from the environment, from gcloud, or from the metadata server.",
+					"markdownDescription": "Cloud sync configuration. Credentials never belong here; ccusage reads them from the environment, from gcloud, or from the metadata server.",
+					"properties": {
+						"agents": {
+							"description": "Agents whose usage is synced.",
+							"items": {
+								"type": "string"
+							},
+							"markdownDescription": "Agents whose usage is synced.",
+							"type": "array"
+						},
+						"auth": {
+							"additionalProperties": false,
+							"description": "Credential source ccusage authenticates with.",
+							"markdownDescription": "Credential source ccusage authenticates with.",
+							"properties": {
+								"kind": {
+									"description": "Which rung of the credential ladder to use.",
+									"enum": ["auto", "adc", "hmac"],
+									"markdownDescription": "Which rung of the credential ladder to use.",
+									"type": "string"
+								}
+							},
+							"type": "object"
+						},
+						"bucket": {
+							"description": "Bucket usage data is synced to.",
+							"markdownDescription": "Bucket usage data is synced to.",
+							"type": "string"
+						},
+						"dashboard": {
+							"additionalProperties": false,
+							"description": "Dashboard publishing settings.",
+							"markdownDescription": "Dashboard publishing settings.",
+							"properties": {
+								"deploy": {
+									"description": "Upload the dashboard assets during `ccusage sync`.",
+									"markdownDescription": "Upload the dashboard assets during `ccusage sync`.",
+									"type": "boolean"
+								},
+								"encrypt": {
+									"description": "Encrypt the data objects with a passphrase-derived key.",
+									"markdownDescription": "Encrypt the data objects with a passphrase-derived key.",
+									"type": "boolean"
+								},
+								"public": {
+									"description": "Serve the dashboard shell to anyone with the link.",
+									"markdownDescription": "Serve the dashboard shell to anyone with the link.",
+									"type": "boolean"
+								}
+							},
+							"type": "object"
+						},
+						"location": {
+							"description": "Location used when ccusage creates the bucket.",
+							"markdownDescription": "Location used when ccusage creates the bucket.",
+							"type": "string"
+						},
+						"machineId": {
+							"description": "Persistent identifier for this machine, written by `ccusage sync setup`.",
+							"markdownDescription": "Persistent identifier for this machine, written by `ccusage sync setup`.",
+							"type": "string"
+						},
+						"machineLabel": {
+							"description": "Human-readable label for this machine in the dashboard.",
+							"markdownDescription": "Human-readable label for this machine in the dashboard.",
+							"type": "string"
+						},
+						"prefix": {
+							"description": "Key prefix inside the bucket.",
+							"markdownDescription": "Key prefix inside the bucket.",
+							"type": "string"
+						},
+						"projectId": {
+							"description": "Cloud project that owns the bucket.",
+							"markdownDescription": "Cloud project that owns the bucket.",
+							"type": "string"
+						},
+						"provider": {
+							"description": "Object storage provider.",
+							"enum": ["gcs"],
+							"markdownDescription": "Object storage provider.",
+							"type": "string"
+						},
+						"redactProjects": {
+							"description": "Replace project names with salted hashes before uploading.",
+							"markdownDescription": "Replace project names with salted hashes before uploading.",
+							"type": "boolean"
+						},
+						"userId": {
+							"description": "Identifier shared by every machine that syncs into this bucket.",
+							"markdownDescription": "Identifier shared by every machine that syncs into this bucket.",
+							"type": "string"
+						}
+					},
+					"type": "object"
+				},
 				"zcode": {
 					"additionalProperties": false,
 					"description": "ZCode configuration.",

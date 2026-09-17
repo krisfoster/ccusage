@@ -56,6 +56,70 @@ pub struct CcusageConfig {
     pub grok: Option<GrokConfig>,
     /// ZCode configuration.
     pub zcode: Option<ZCodeConfig>,
+    /// Cloud sync configuration. Credentials never belong here; ccusage reads them
+    /// from the environment, from gcloud, or from the metadata server.
+    pub sync: Option<SyncConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncConfig {
+    /// Object storage provider.
+    pub provider: Option<ConfigSyncProvider>,
+    /// Cloud project that owns the bucket.
+    pub project_id: Option<String>,
+    /// Bucket usage data is synced to.
+    pub bucket: Option<String>,
+    /// Location used when ccusage creates the bucket.
+    pub location: Option<String>,
+    /// Key prefix inside the bucket.
+    pub prefix: Option<String>,
+    /// Credential source ccusage authenticates with.
+    pub auth: Option<SyncAuthConfig>,
+    /// Persistent identifier for this machine, written by `ccusage sync setup`.
+    pub machine_id: Option<String>,
+    /// Human-readable label for this machine in the dashboard.
+    pub machine_label: Option<String>,
+    /// Identifier shared by every machine that syncs into this bucket.
+    pub user_id: Option<String>,
+    /// Agents whose usage is synced.
+    pub agents: Option<Vec<String>>,
+    /// Replace project names with salted hashes before uploading.
+    pub redact_projects: Option<bool>,
+    /// Dashboard publishing settings.
+    pub dashboard: Option<SyncDashboardConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncAuthConfig {
+    /// Which rung of the credential ladder to use.
+    pub kind: Option<ConfigSyncAuthKind>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncDashboardConfig {
+    /// Upload the dashboard assets during `ccusage sync`.
+    pub deploy: Option<bool>,
+    /// Serve the dashboard shell to anyone with the link.
+    pub public: Option<bool>,
+    /// Encrypt the data objects with a passphrase-derived key.
+    pub encrypt: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigSyncProvider {
+    Gcs,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigSyncAuthKind {
+    Auto,
+    Adc,
+    Hmac,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1207,6 +1271,7 @@ mod tests {
                 "openclaw",
                 "pi",
                 "qwen",
+                "sync",
                 "zcode",
             ],
         );

@@ -420,6 +420,102 @@
 			"description": "Display this version"
 		}
 	],
+	"sync_options": [
+		{
+			"flags": "-j, --json",
+			"description": "Output in JSON format",
+			"default": "false"
+		},
+		{
+			"flags": "--config <config>",
+			"description": "Path to configuration file",
+			"default": "auto-discovery"
+		},
+		{
+			"flags": "-h, --help",
+			"description": "Display this help message"
+		}
+	],
+	"sync_run_options": [
+		{
+			"flags": "--dry-run",
+			"description": "Report what would be uploaded without writing to the bucket",
+			"default": "false"
+		}
+	],
+	"sync_setup_options": [
+		{
+			"flags": "--provider <provider>",
+			"description": "Object storage provider",
+			"default": "gcs",
+			"choices": ["gcs"]
+		},
+		{
+			"flags": "-p, --project <project>",
+			"description": "Cloud project that owns the bucket",
+			"default": "discovered"
+		},
+		{
+			"flags": "--bucket <bucket>",
+			"description": "Bucket to sync into",
+			"default": "created for you"
+		},
+		{
+			"flags": "--location <location>",
+			"description": "Location for a bucket ccusage creates",
+			"default": "project default"
+		},
+		{
+			"flags": "--prefix <prefix>",
+			"description": "Key prefix inside the bucket",
+			"default": "ccusage/v1"
+		},
+		{
+			"flags": "--auth <auth>",
+			"description": "Credential source to configure",
+			"default": "auto",
+			"choices": ["auto", "adc", "hmac"]
+		},
+		{
+			"flags": "--non-interactive",
+			"description": "Never prompt; fail instead of asking a question",
+			"default": "false"
+		},
+		{
+			"flags": "--recreate",
+			"description": "Replace the configured bucket instead of reusing it",
+			"default": "false"
+		}
+	],
+	"sync_forget_options": [
+		{
+			"flags": "-y, --yes",
+			"description": "Skip the confirmation prompt",
+			"default": "false"
+		}
+	],
+	"sync_dashboard_options": [
+		{
+			"flags": "--deploy",
+			"description": "Upload the dashboard assets to the bucket",
+			"default": "false"
+		},
+		{
+			"flags": "--share",
+			"description": "Mint a signed link that reads the private data objects",
+			"default": "false"
+		},
+		{
+			"flags": "--ttl <ttl>",
+			"description": "How long a shared link stays valid, such as 30m, 24h, or 7d",
+			"default": "24h"
+		},
+		{
+			"flags": "--open",
+			"description": "Open the dashboard in a browser",
+			"default": "false"
+		}
+	],
 	"weekly_options": [
 		{
 			"flags": "-w, --start-of-week [start-of-week]",
