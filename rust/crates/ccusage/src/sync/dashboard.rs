@@ -96,7 +96,10 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             &keys,
             &assets_bucket,
             &project,
-            status.location.as_deref().unwrap_or(super::DEFAULT_LOCATION),
+            status
+                .location
+                .as_deref()
+                .unwrap_or(super::DEFAULT_LOCATION),
             &credentials,
             &public,
         )?;
@@ -617,14 +620,8 @@ mod tests {
         let keys = KeySpace::new("ccusage/v1").expect("key space");
         let hmac = HmacKey::new("GOOG1EXAMPLE", "c2VjcmV0");
 
-        let link = share_link(
-            "my-bucket",
-            &assets_bucket("my-bucket"),
-            &keys,
-            &hmac,
-            3600,
-        )
-        .expect("a link");
+        let link = share_link("my-bucket", &assets_bucket("my-bucket"), &keys, &hmac, 3600)
+            .expect("a link");
 
         let (base, fragment) = link.split_once('#').expect("a fragment");
         assert!(!base.contains('?'), "the page URL carries no query string");
