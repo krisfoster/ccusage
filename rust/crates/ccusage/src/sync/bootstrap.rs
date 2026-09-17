@@ -13,9 +13,10 @@ use ccusage_objectstore::{KeySpace, ObjectStore, ObjectStoreError, Precondition}
 use ccusage_sync::salt::{Salt, SaltOrigin, reconcile};
 use serde_json::{Value, json};
 
-/// The manifest shape this build creates. Machine registration is a separate,
-/// compare-and-swap concern and is not part of bootstrapping.
+/// The manifest shape this build creates.
 const MANIFEST_SCHEMA: u32 = 1;
+/// Bounded so a bucket that never settles fails loudly instead of spinning.
+const MAX_ATTEMPTS: usize = 5;
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
@@ -79,6 +80,74 @@ pub(crate) fn ensure_manifest(
         Ok(_) | Err(ObjectStoreError::Conflict { .. }) => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Adds this machine to the manifest's roster so other machines — and the
+/// dashboard — know it exists.
+///
+/// Unlike the machine's own objects, the manifest has as many writers as the
+/// user has machines, so the write carries the generation it was read at and a
+/// lost race is re-applied to the roster that won. Overwriting instead would
+/// delete a machine that registered a moment earlier, and a machine missing
+/// from the roster is a machine whose shards nothing reads.
+pub(crate) fn register_machine(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    machine_id: &str,
+) -> Result<()> {
+    let key = keys.manifest();
+    for _ in 0..MAX_ATTEMPTS {
+        let (mut document, generation) = match store.get(&key).map_err(|error| error.to_string())? {
+            Some((body, meta)) => (
+                serde_json::from_slice::<Value>(&body)
+                    .map_err(|error| format!("{} is not readable JSON: {error}", key.path()))?,
+                meta.generation,
+            ),
+            None => (
+                json!({ "schema": MANIFEST_SCHEMA, "userId": user_id }),
+                None,
+            ),
+        };
+        let machines = document
+            .get("machines")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if machines
+            .iter()
+            .any(|entry| entry.as_str() == Some(machine_id))
+        {
+            return Ok(());
+        }
+        let mut machines: Vec<String> = machines
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        machines.push(machine_id.to_string());
+        machines.sort();
+        document["machines"] = json!(machines);
+
+        let precondition = match &generation {
+            Some(generation) => Precondition::IfGenerationMatch(generation.clone()),
+            None => Precondition::IfAbsent,
+        };
+        match store.put(
+            &key,
+            document.to_string().as_bytes(),
+            "application/json",
+            &precondition,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(
+        "the bucket manifest kept changing while registering this machine; re-run setup."
+            .to_string(),
+    )
 }
 
 fn read_field(
@@ -187,6 +256,14 @@ mod tests {
         ) -> ccusage_objectstore::Result<ObjectMeta> {
             if !self.raced.replace(true) {
                 seeded_salt(&self.inner, &self.keys, SALT);
+                let _ = self.inner.put(
+                    &self.keys.manifest(),
+                    json!({ "schema": 1, "userId": "u-1", "machines": ["machine-racer"] })
+                        .to_string()
+                        .as_bytes(),
+                    "application/json",
+                    &Precondition::None,
+                );
             }
             self.inner.put(key, body, content_type, precondition)
         }
@@ -246,6 +323,49 @@ mod tests {
             manifest_user_id(&store, &keys).expect("read"),
             Some("u-first".to_string())
         );
+    }
+
+    #[test]
+    fn registering_a_machine_creates_the_roster_and_is_idempotent() {
+        let store = MemoryStore::new();
+        let keys = keys();
+
+        register_machine(&store, &keys, "u-1", "machine-1").expect("first");
+        register_machine(&store, &keys, "u-1", "machine-2").expect("second");
+        register_machine(&store, &keys, "u-1", "machine-1").expect("repeat");
+
+        let (body, _) = store.get(&keys.manifest()).expect("get").expect("written");
+        let document: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(document["machines"], json!(["machine-1", "machine-2"]));
+        assert_eq!(document["userId"], "u-1");
+    }
+
+    /// The manifest has one writer per machine, so a lost race must merge.
+    #[test]
+    fn registering_a_machine_keeps_one_registered_concurrently() {
+        let keys = keys();
+        let store = RaceLostStore {
+            inner: MemoryStore::new(),
+            keys: keys.clone(),
+            raced: MutCell::new(false),
+        };
+        store
+            .inner
+            .put(
+                &keys.manifest(),
+                json!({ "schema": 1, "userId": "u-1", "machines": [] })
+                    .to_string()
+                    .as_bytes(),
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("seed");
+
+        register_machine(&store, &keys, "u-1", "machine-1").expect("register");
+
+        let (body, _) = store.get(&keys.manifest()).expect("get").expect("written");
+        let document: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(document["machines"], json!(["machine-1", "machine-racer"]));
     }
 
     #[test]

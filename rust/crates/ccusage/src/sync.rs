@@ -6,7 +6,9 @@ pub(crate) mod auth;
 pub(crate) mod bootstrap;
 pub(crate) mod bucket;
 pub(crate) mod doctor;
+pub(crate) mod machine;
 pub(crate) mod project;
+pub(crate) mod run;
 pub(crate) mod status;
 
 use std::{
@@ -20,7 +22,10 @@ use ccusage_config::{
     sync_writeback_path,
 };
 use ccusage_objectstore::KeySpace;
-use ccusage_sync::identity::{IdentityInputs, os_entropy, resolve_identity};
+use ccusage_sync::{
+    fingerprint::{FingerprintSources, observe_fingerprint},
+    identity::{IdentityInputs, os_entropy, resolve_identity},
+};
 
 use crate::{
     Result,
@@ -44,6 +49,7 @@ const STORAGE_ENDPOINT: &str = "https://storage.googleapis.com";
 pub(crate) fn run(args: SyncArgs) -> Result<()> {
     let config = ConfigContext::from_args(&std::env::args().skip(1).collect::<Vec<_>>());
     match args.command {
+        SyncCommand::Run(run_args) => run::execute(&config, &run_args),
         SyncCommand::Setup(setup) => setup_sync(&setup, &config, args.config),
         SyncCommand::Status => show_status(&config, args.json),
         SyncCommand::Doctor => run_doctor(&config, args.json),
@@ -233,7 +239,27 @@ fn setup_sync(
     )
     .map_err(|error| cli_error(error.to_string()))?;
     bootstrap::ensure_manifest(&store, &keys, identity.user.as_str()).map_err(cli_error)?;
-    println!("Syncing as machine {}.", identity.machine);
+    let machine_id = identity.machine.to_string();
+    bootstrap::register_machine(&store, &keys, identity.user.as_str(), &machine_id)
+        .map_err(cli_error)?;
+    let fingerprint = observe_fingerprint(&FingerprintSources::platform_default());
+    let label = sync_config.and_then(|sync| sync.machine_label.clone());
+    machine::update_machine(
+        &store,
+        &keys,
+        identity.user.as_str(),
+        &machine_id,
+        |record| {
+            record.label.clone_from(&label);
+            record.os = Some(std::env::consts::OS.to_string());
+            record.fingerprint.clone_from(&fingerprint);
+        },
+    )
+    .map_err(cli_error)?;
+    for warning in &identity.warnings {
+        println!("{warning}");
+    }
+    println!("Syncing as machine {machine_id}.");
 
     let Some(path) = sync_writeback_path(config_path.as_deref()) else {
         return Err(cli_error(
@@ -249,7 +275,7 @@ fn setup_sync(
             bucket: Some(info.name.clone()),
             location: Some(info.location.clone()),
             prefix: Some(prefix),
-            machine_id: Some(identity.machine.to_string()),
+            machine_id: Some(machine_id),
             user_id: Some(identity.user.to_string()),
             salt: Some(salt.expose().to_string()),
         },
