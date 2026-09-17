@@ -466,6 +466,32 @@ fn respond(
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let path = line.split_whitespace().nth(1).unwrap_or("/");
+
+    let mut host = String::new();
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("host")
+        {
+            host = value.trim().to_string();
+        }
+    }
+    if !host_is_loopback(&host) {
+        let body = b"the ccusage dashboard answers loopback names only".as_slice();
+        stream.write_all(
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        stream.write_all(body)?;
+        return stream.flush();
+    }
     let requested = path
         .split('?')
         .next()
@@ -509,6 +535,19 @@ fn respond(
     stream.flush()
 }
 
+/// The server binds loopback, but a name that *resolves* to loopback is enough
+/// for a page on the internet to talk to it (DNS rebinding), and this one hands
+/// out the user's spend. Only the names a local browser would actually send are
+/// answered.
+fn host_is_loopback(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        // An IPv6 literal is bracketed, so the colons inside it are not a port.
+        Some(rest) => rest.split_once(']').map_or(rest, |(name, _)| name),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1")
+}
+
 fn open_in_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -545,7 +584,10 @@ fn rfc3339(epoch_secs: u64) -> String {
 }
 
 fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // The URL-safe alphabet, and not merely as a nicety: the payload rides in a
+    // fragment the page reads with `URLSearchParams`, which decodes `+` as a
+    // space and would quietly corrupt every link containing one.
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let mut buffer = [0u8; 3];
@@ -629,8 +671,8 @@ mod tests {
                         .is_some_and(|url| url.starts_with("https://")),
                     "{target} has no source link"
                 );
-                assert!(row["input"].as_f64().is_some());
-                assert!(row["output"].as_f64().is_some());
+                assert!(row["input"].as_f64().is_some_and(|rate| rate > 0.0));
+                assert!(row["output"].as_f64().is_some_and(|rate| rate > 0.0));
             }
         }
     }
@@ -700,5 +742,35 @@ mod tests {
         assert_eq!(base64url(b"ab"), "YWI=");
         assert_eq!(base64url(b"abc"), "YWJj");
         assert_eq!(base64url(br#"{"a":1}"#), "eyJhIjoxfQ==");
+    }
+
+    /// `URLSearchParams` reads `+` as a space, so a payload encoded with the
+    /// standard alphabet decodes to rubbish for the links unlucky enough to
+    /// contain one.
+    #[test]
+    fn the_fragment_payload_uses_url_safe_characters_only() {
+        let awkward: Vec<u8> = (0u8..=255).collect();
+
+        let encoded = base64url(&awkward);
+
+        assert!(
+            encoded
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || matches!(character, '-' | '_' | '=')),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn only_loopback_host_names_are_answered() {
+        assert!(host_is_loopback("127.0.0.1:8787"));
+        assert!(host_is_loopback("localhost:8787"));
+        assert!(host_is_loopback("[::1]:8787"));
+        assert!(host_is_loopback("localhost"));
+
+        assert!(!host_is_loopback(""), "a request without a Host header");
+        assert!(!host_is_loopback("spend.attacker.example:8787"));
+        assert!(!host_is_loopback("127.0.0.1.attacker.example"));
     }
 }
