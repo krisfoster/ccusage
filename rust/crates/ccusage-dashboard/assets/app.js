@@ -10,7 +10,6 @@
  */
 
 const ROLLUP_SCHEMA = 1;
-const BUCKETS_PER_DAY = 96;
 const BUCKET_MS = 15 * 60 * 1000;
 
 const state = {
@@ -615,4 +614,4 @@ async function main() {
 	}
 }
 
-main();
+void main();
