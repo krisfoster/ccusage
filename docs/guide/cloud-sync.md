@@ -183,6 +183,82 @@ Uploaded days hold token counts, costs, and 15-minute activity buckets. Project
 paths are hashed with your bucket's salt before upload, and prompts, file
 contents, and file paths are never uploaded.
 
+### Deleting old days
+
+Nothing is ever deleted unless you ask for it:
+
+```bash
+ccusage sync run --prune 365
+```
+
+`--prune <days>` deletes uploaded days older than that many days, from every
+machine in the bucket, and rewrites the totals so the deleted days no longer
+count. Your local logs are untouched. Pair it with `--dry-run` to see which
+days would go before any of them do.
+
+## When a sync is interrupted
+
+Every step is written in an order that makes a half-finished sync safe: a day's
+data is uploaded before the index that names it, and the index before the totals
+derived from it. A sync that is killed, loses its connection, or hits an expired
+credential leaves the bucket readable and correct — just missing the part it
+never wrote — and re-running picks up from there without duplicating anything.
+
+Two cases stop a run before it writes:
+
+- **A clock that is more than an hour from the bucket's.** Usage would be filed
+  under the wrong days, and nothing downstream could tell. Fix the system clock
+  and run again; `ccusage sync doctor` reports the skew.
+- **Another machine writing the same object at the same time.** The run reports
+  the clash rather than overwriting the other machine's work.
+
+`run`, `repair`, `forget`, and `merge-machine` all exit non-zero on failure and
+print what to do next.
+
+## Maintenance
+
+These commands are for the rare occasions when the bucket's bookkeeping and its
+actual contents disagree, or when a machine is retired.
+
+### Rebuilding from the data
+
+```bash
+ccusage sync repair
+ccusage sync repair --dry-run
+```
+
+`repair` ignores the bucket's indexes and totals and rebuilds them by listing
+what is actually there: machines missing from the roster are re-registered,
+missing or corrupt indexes are rewritten, and the rollups the dashboard reads
+are recomputed. It never deletes usage data, so it is safe to run whenever a
+total looks wrong.
+
+### Retiring a machine
+
+```bash
+ccusage sync forget old-laptop
+ccusage sync forget old-laptop --yes
+```
+
+`forget` deletes everything a machine uploaded and removes it from the bucket's
+roster, then rewrites the totals without it. It asks for confirmation first
+unless you pass `--yes`. This is irreversible: the deleted days only come back
+if that machine still has the local logs and syncs again.
+
+### One machine that reinstalled
+
+A machine that is set up again gets a new machine identity, so its history
+appears twice — once under each identity. Merge them:
+
+```bash
+ccusage sync merge-machine <old-id> <new-id>
+```
+
+The old machine's days are moved under the new identity, the old identity is
+removed, and the totals are rewritten. If both identities hold data for the same
+day, the merge is refused rather than picking a winner — decide which copy you
+want, `forget` the other machine, and merge again.
+
 ## Privacy
 
 Buckets ccusage creates use uniform bucket-level access and grant nothing to
