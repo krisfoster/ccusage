@@ -490,6 +490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccusage-sync"
+version = "0.0.0"
+dependencies = [
+ "ccusage-test-support",
+ "getrandom 0.4.3",
+ "sha2",
+]
+
+[[package]]
 name = "ccusage-terminal"
 version = "0.0.0"
 dependencies = [

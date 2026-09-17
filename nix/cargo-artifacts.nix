@@ -29,6 +29,7 @@ let
     "ccusage-core"
     "ccusage-adapter-common"
     "ccusage-objectstore"
+    "ccusage-sync"
     "ccusage-terminal"
     "ccusage-test-support"
   ];

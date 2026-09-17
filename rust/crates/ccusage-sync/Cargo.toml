@@ -1,0 +1,12 @@
+[package]
+name = "ccusage-sync"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+ccusage-test-support.workspace = true
