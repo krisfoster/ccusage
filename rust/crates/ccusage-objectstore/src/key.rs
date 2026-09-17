@@ -46,6 +46,8 @@ pub enum RollupKind {
     Weekly,
     Monthly,
     Models,
+    /// Dedupe keys behind the daily rollup. Merge state, not a view.
+    Keys,
 }
 
 /// A calendar date in UTC. Shards are keyed by UTC date so the uploader's timezone never leaks
@@ -211,6 +213,7 @@ impl KeySpace {
             RollupKind::Weekly => "weekly",
             RollupKind::Monthly => "monthly",
             RollupKind::Models => "models",
+            RollupKind::Keys => "keys",
         };
         self.private(&format!("rollup/{name}.json"))
     }

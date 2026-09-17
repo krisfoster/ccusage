@@ -15,6 +15,7 @@
 //! with each other.
 
 use ccusage_objectstore::{Key, KeySpace, ObjectStore, ObjectStoreError, Precondition, RollupKind};
+use ccusage_sync::duplicates::{KEY_INDEX_SCHEMA, KeyIndex, mark_duplicates};
 use ccusage_sync::rollup::{ANOMALY_LATE_EDIT, Anomaly, Daily, ROLLUP_SCHEMA, ShardRef, derive};
 use ccusage_sync::shard::{ParsedShard, Shard};
 use serde::Serialize;
@@ -41,6 +42,8 @@ pub(crate) struct RollupSummary {
     pub missing: usize,
     /// Days that changed after they had settled, across every machine.
     pub late_edits: usize,
+    /// Cells another machine had already reported, left out of the totals.
+    pub suppressed_duplicates: usize,
 }
 
 impl RollupSummary {
@@ -53,6 +56,12 @@ impl RollupSummary {
             text.push_str(&format!(
                 " {} shard(s) were written by a newer ccusage and are not counted; upgrade to include them.",
                 self.skipped_newer
+            ));
+        }
+        if self.suppressed_duplicates > 0 {
+            text.push_str(&format!(
+                " {} cell(s) were reported by more than one machine and are counted once.",
+                self.suppressed_duplicates
             ));
         }
         if self.late_edits > 0 {
@@ -80,6 +89,7 @@ pub(crate) fn refresh(
 ) -> Result<RollupSummary> {
     for _ in 0..MAX_ATTEMPTS {
         let (mut daily, generation) = read_daily(store, keys)?;
+        let mut key_index = read_key_index(store, keys)?;
         let machines = bootstrap::manifest_machines(store, keys)?;
         let mut summary = RollupSummary {
             machines: machines.len(),
@@ -117,12 +127,17 @@ pub(crate) fn refresh(
                         )),
                     });
                 }
-                if daily.is_current(&reference, &entry.content_hash) {
+                // The key index has to be re-read too when it is missing this
+                // shard, or a bucket rolled up before dedupe existed would
+                // never gain the keys that detect it.
+                if daily.is_current(&reference, &entry.content_hash) && key_index.covers(&reference)
+                {
                     continue;
                 }
                 match load_shard(store, keys, user_id, &reference)? {
                     Some(ParsedShard::Known(shard)) => {
                         daily.apply(&shard);
+                        key_index.apply(&shard);
                         summary.rolled_up += 1;
                     }
                     // Counting a shard this build cannot fully read would
@@ -138,7 +153,18 @@ pub(crate) fn refresh(
         // leave the totals too, or the dashboard keeps charging for it.
         for stale in stale_refs(&daily, &live) {
             daily.forget(&stale);
+            key_index.forget(&stale);
         }
+
+        // After every contribution is in place, never per shard: whether a cell
+        // is a duplicate depends on what the other machines reported.
+        mark_duplicates(&mut daily, &key_index);
+        summary.suppressed_duplicates = daily
+            .days
+            .values()
+            .flatten()
+            .filter(|cell| cell.suppressed.is_some())
+            .count();
 
         daily.schema = ROLLUP_SCHEMA;
         daily.generated_at = now.to_string();
@@ -157,6 +183,12 @@ pub(crate) fn refresh(
             Err(error) => return Err(error.to_string()),
         }
 
+        // Merge state rather than a view, and rebuildable from the shards, so
+        // it rides along with the derived writes instead of its own CAS.
+        key_index.schema = KEY_INDEX_SCHEMA;
+        key_index.generated_at = now.to_string();
+        put_derived(store, keys, RollupKind::Keys, &key_index)?;
+
         let derived = derive(&daily);
         put_derived(store, keys, RollupKind::Weekly, &derived.weekly)?;
         put_derived(store, keys, RollupKind::Monthly, &derived.monthly)?;
@@ -167,6 +199,23 @@ pub(crate) fn refresh(
         "the bucket's rollups kept changing under this sync. Re-run 'ccusage sync run' once no other sync is running."
             .to_string(),
     )
+}
+
+/// A key index this build cannot read is rebuilt rather than trusted: without
+/// it the merge would under-suppress, never over-suppress.
+fn read_key_index(store: &dyn ObjectStore, keys: &KeySpace) -> Result<KeyIndex> {
+    let key = keys.rollup(RollupKind::Keys);
+    let Some((body, _)) = store.get(&key).map_err(|error| error.to_string())? else {
+        return Ok(KeyIndex::default());
+    };
+    let index: KeyIndex = match serde_json::from_slice(&body) {
+        Ok(index) => index,
+        Err(_) => return Ok(KeyIndex::default()),
+    };
+    if index.schema > KEY_INDEX_SCHEMA {
+        return Ok(KeyIndex::default());
+    }
+    Ok(index)
 }
 
 fn stale_refs(daily: &Daily, live: &[String]) -> Vec<ShardRef> {
@@ -255,7 +304,7 @@ fn put_derived<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use ccusage_sync::rollup::{Models, Periodic};
-    use ccusage_sync::shard::{Cell, Dedupe, SHARD_SCHEMA};
+    use ccusage_sync::shard::{Cell, Dedupe, DedupeKey, SHARD_SCHEMA};
     use ccusage_test_support::objectstore::MemoryStore;
 
     use super::super::machine::{IndexEntry, MachineIndex};
@@ -266,6 +315,16 @@ mod tests {
 
     fn keys() -> KeySpace {
         KeySpace::new("ccusage/v1").expect("prefix")
+    }
+
+    /// The same shard, but carrying the dedupe keys that make two machines'
+    /// copies comparable.
+    fn shard_with_keys(machine: &str, date: &str, input: u64, dedupe_keys: &[u64]) -> Shard {
+        let mut shard = shard(machine, date, input);
+        shard.cells[0].keys = dedupe_keys.iter().copied().map(DedupeKey).collect();
+        shard.content_hash = None;
+        shard.finish().expect("finish");
+        shard
     }
 
     fn shard(machine: &str, date: &str, input: u64) -> Shard {
@@ -470,6 +529,60 @@ mod tests {
         assert!(summary.to_text().contains("missing from the bucket"));
     }
 
+    /// Two machines reading the same synced log directory report the same
+    /// entries; counting both would inflate the user's spend.
+    #[test]
+    fn the_same_entries_reported_by_two_machines_are_counted_once() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(
+            &store,
+            &keys,
+            &shard_with_keys("aaaa", "2026-09-17", 100, &[1, 2]),
+        );
+        publish(
+            &store,
+            &keys,
+            &shard_with_keys("bbbb", "2026-09-17", 100, &[1, 2]),
+        );
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        // Both shards are rolled up; only one copy reaches the totals.
+        assert_eq!(summary.rolled_up, 2);
+        assert_eq!(summary.suppressed_duplicates, 1);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 100);
+        assert_eq!(
+            read_models(&store, &keys).models["claude-sonnet-4-5"].input_tokens,
+            100
+        );
+    }
+
+    /// The suppression has to survive a pass that re-reads nothing, which is
+    /// what the separate key index exists for.
+    #[test]
+    fn a_duplicate_stays_suppressed_on_a_pass_that_reads_no_shards() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(
+            &store,
+            &keys,
+            &shard_with_keys("aaaa", "2026-09-17", 100, &[1, 2]),
+        );
+        publish(
+            &store,
+            &keys,
+            &shard_with_keys("bbbb", "2026-09-17", 100, &[1, 2]),
+        );
+        refresh(&store, &keys, USER, NOW).expect("first");
+
+        let summary = refresh(&store, &keys, USER, "2026-09-17T19:00:00Z").expect("second");
+
+        assert_eq!(summary.rolled_up, 0);
+        assert_eq!(summary.suppressed_duplicates, 1);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 100);
+    }
+
     /// The dashboard reads anomalies off the daily rollup, so a day a machine
     /// rewrote after it settled has to travel from that machine's index into
     /// `daily.json` — the reader never sees the index itself.
@@ -571,9 +684,8 @@ mod tests {
         assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 125);
     }
 
-    /// Rollups are derived data and carry no dedupe keys, project hashes or
-    /// salt — but they are still spend, so they must never land in the public
-    /// dashboard prefix.
+    /// The views are spend and the key index is salted dedupe material, so
+    /// none of them may land in the public dashboard prefix.
     #[test]
     fn every_rollup_object_is_written_to_a_private_key() {
         for kind in [
@@ -581,6 +693,7 @@ mod tests {
             RollupKind::Weekly,
             RollupKind::Monthly,
             RollupKind::Models,
+            RollupKind::Keys,
         ] {
             assert!(!keys().rollup(kind).is_public());
         }
