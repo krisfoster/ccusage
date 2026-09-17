@@ -7,28 +7,29 @@
 //! that gains a single entry rewrites only that day.
 
 use ccusage_config::ConfigContext;
-use ccusage_core::LoadedEntry;
 use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, UtcDate};
-use ccusage_sync::{FoldContext, FoldEntry, Salt, Shard, fold, is_finalized};
+use ccusage_sync::{FoldContext, Salt, Shard, fold, is_finalized};
 
 use super::machine::{self, IndexEntry, MachineIndex};
 use super::now_ms;
 use crate::{
     Result,
     cli::{SharedArgs, SyncRunArgs},
-    cli_error, format_rfc3339_millis, load_entries,
-    sync::{failures, maintenance, rollups},
+    cli_error, format_rfc3339_millis,
+    pricing::PricingMap,
+    sync::{failures, maintenance, rollups, sources},
 };
-
-/// The agent this build syncs. Shards are keyed by agent, so adding another is
-/// a matter of folding its entries under a different name, not a layout change.
-const AGENT: &str = "claude";
 
 /// What a run did, in the terms the user is told about.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RunSummary {
     pub uploaded: Vec<String>,
     pub unchanged: usize,
+    /// The agents that had usage on this machine, so the user can see at a
+    /// glance that a tool they expected is missing.
+    pub agents: Vec<String>,
+    /// Agents whose logs could not be read, with the reason.
+    pub skipped: Vec<String>,
     /// Days that changed after they had settled. Reported because a reader may
     /// already have cached a total this run has just moved.
     pub late_edits: Vec<String>,
@@ -47,6 +48,16 @@ impl RunSummary {
                 self.unchanged
             )
         };
+        if !self.agents.is_empty() {
+            text.push_str(&format!(" Agents: {}.", self.agents.join(", ")));
+        }
+        if !self.skipped.is_empty() {
+            text.push_str(&format!(
+                " Warning: {} agent(s) could not be read and were skipped: {}.",
+                self.skipped.len(),
+                self.skipped.join("; ")
+            ));
+        }
         if !self.late_edits.is_empty() {
             text.push_str(&format!(
                 " Warning: {} finalized day(s) changed and were rewritten: {}.",
@@ -65,6 +76,35 @@ pub(crate) struct UploadPlan {
     pub unchanged: usize,
     /// Dates whose shard had been finalized and changed anyway.
     pub late_edits: Vec<String>,
+}
+
+impl UploadPlan {
+    /// Folds another agent's plan into this one.
+    ///
+    /// A date is reported once however many agents touched it: the user is
+    /// told which days moved, and "2026-09-17" three times says nothing more
+    /// than once does.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.uploads.extend(other.uploads);
+        self.unchanged += other.unchanged;
+        for date in other.late_edits {
+            if !self.late_edits.contains(&date) {
+                self.late_edits.push(date);
+            }
+        }
+    }
+
+    /// The dates this plan would upload, each named once and in order.
+    pub(crate) fn dates(&self) -> Vec<String> {
+        let mut dates: Vec<String> = self
+            .uploads
+            .iter()
+            .map(|shard| shard.utc_date.clone())
+            .collect();
+        dates.sort_unstable();
+        dates.dedup();
+        dates
+    }
 }
 
 /// Splits folded shards into the ones the bucket needs and the ones it has.
@@ -172,26 +212,6 @@ pub(crate) fn parse_date(utc_date: &str) -> std::result::Result<UtcDate, String>
     UtcDate::new(year, month, day).map_err(|error| error.to_string())
 }
 
-/// Entries as the adapters produce them, reduced to what a shard may hold.
-fn to_fold_entries(entries: &[LoadedEntry]) -> Vec<FoldEntry> {
-    entries
-        .iter()
-        .map(|entry| FoldEntry {
-            timestamp_ms: entry.timestamp.as_millis(),
-            model: entry.model.clone().unwrap_or_else(|| "unknown".to_string()),
-            input_tokens: entry.data.message.usage.input_tokens,
-            output_tokens: entry.data.message.usage.output_tokens,
-            cache_write_tokens: entry.data.message.usage.cache_creation_input_tokens,
-            cache_read_tokens: entry.data.message.usage.cache_read_input_tokens,
-            cost: entry.cost,
-            session_id: entry.session_id.to_string(),
-            project_path: entry.project_path.to_string(),
-            message_id: entry.data.message.id.clone(),
-            request_id: entry.data.request_id.clone(),
-        })
-        .collect()
-}
-
 pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> {
     let salt = configured_salt(config)?;
     let super::Session {
@@ -205,25 +225,38 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     // wrong dates, and no later step can tell that it did.
     failures::check_clock(bucket_time_ms(&store, &keys), now_ms()).map_err(cli_error)?;
 
-    let entries = load_entries(&SharedArgs::with_defaults(), None)?;
-    let context = FoldContext {
-        agent: AGENT,
-        machine_id: &machine_id,
-        user_id: &user_id,
-        ccusage_version: env!("CARGO_PKG_VERSION"),
-        cost_mode: "auto",
-        pricing_snapshot: concat!("embedded@", env!("CARGO_PKG_VERSION")),
-        generated_at: &iso_now(),
-        salt: &salt,
-        redact_projects: config
-            .sync()
-            .and_then(|sync| sync.redact_projects)
-            .unwrap_or(true),
-    };
-    let shards = fold(&to_fold_entries(&entries), &context);
+    let shared = SharedArgs::with_defaults();
+    let pricing =
+        PricingMap::load_with_overrides(shared.offline, false, shared.pricing_overrides.iter());
+    let loaded = sources::load_all(&shared, &pricing);
+    let redact_projects = config
+        .sync()
+        .and_then(|sync| sync.redact_projects)
+        .unwrap_or(true);
+    let generated_at = iso_now();
 
     let index = machine::load_index(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
-    let plan = plan_uploads(shards, &index, AGENT);
+    let mut plan = UploadPlan::default();
+    for agent in &loaded.agents {
+        let context = FoldContext {
+            agent: agent.agent,
+            machine_id: &machine_id,
+            user_id: &user_id,
+            ccusage_version: env!("CARGO_PKG_VERSION"),
+            cost_mode: "auto",
+            pricing_snapshot: concat!("embedded@", env!("CARGO_PKG_VERSION")),
+            generated_at: &generated_at,
+            salt: &salt,
+            redact_projects,
+        };
+        plan.absorb(plan_uploads(
+            fold(&agent.entries, &context),
+            &index,
+            agent.agent,
+        ));
+    }
+    let agents: Vec<String> = loaded.named().iter().map(|name| name.to_string()).collect();
+    let skipped = skipped(&loaded);
 
     let summary = if args.dry_run {
         if let Some(keep_days) = args.prune {
@@ -232,17 +265,15 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             println!("{}", pruned.to_text());
         }
         RunSummary {
-            uploaded: plan
-                .uploads
-                .iter()
-                .map(|shard| shard.utc_date.clone())
-                .collect(),
+            uploaded: plan.dates(),
             unchanged: plan.unchanged,
+            agents,
+            skipped,
             late_edits: plan.late_edits,
         }
     } else {
         let now = iso_now();
-        let uploaded = upload(
+        upload(
             &store,
             &keys,
             &user_id,
@@ -269,13 +300,25 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
         let rollup = rollups::refresh(&store, &keys, &user_id, &now).map_err(cli_error)?;
         println!("{}", rollup.to_text());
         RunSummary {
-            uploaded,
+            uploaded: plan.dates(),
             unchanged: plan.unchanged,
+            agents,
+            skipped,
             late_edits: plan.late_edits,
         }
     };
     println!("{}", summary.to_text(args.dry_run));
     Ok(())
+}
+
+/// Agents that failed to load, named with the reason so the user can tell a
+/// tool they never installed from a log this build could not parse.
+fn skipped(loaded: &sources::Sources) -> Vec<String> {
+    loaded
+        .failures
+        .iter()
+        .map(|failure| format!("{} ({})", failure.agent, failure.detail))
+        .collect()
 }
 
 /// When the bucket's own clock last touched the manifest, as the reference
@@ -317,6 +360,9 @@ mod tests {
 
     use super::*;
 
+    /// The agent the fixtures fold under. Shards are keyed by agent, and the
+    /// rules under test do not vary by which one.
+    const AGENT: &str = "claude";
     const USER: &str = "user-1";
     const MACHINE: &str = "machine-1";
     const NOW: &str = "2026-09-17T18:12:03Z";
@@ -616,6 +662,8 @@ mod tests {
         let summary = RunSummary {
             uploaded: vec!["2026-09-17".to_string()],
             unchanged: 2,
+            agents: vec!["claude".to_string()],
+            skipped: Vec::new(),
             late_edits: Vec::new(),
         };
 
@@ -632,6 +680,8 @@ mod tests {
         let summary = RunSummary {
             uploaded: vec!["2026-09-10".to_string()],
             unchanged: 0,
+            agents: vec!["claude".to_string()],
+            skipped: Vec::new(),
             late_edits: vec!["2026-09-10".to_string()],
         };
 

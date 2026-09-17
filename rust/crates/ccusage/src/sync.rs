@@ -13,6 +13,7 @@ pub(crate) mod maintenance;
 pub(crate) mod project;
 pub(crate) mod rollups;
 pub(crate) mod run;
+pub(crate) mod sources;
 pub(crate) mod status;
 
 use std::{
