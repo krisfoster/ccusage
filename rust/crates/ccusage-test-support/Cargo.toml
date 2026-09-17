@@ -6,5 +6,6 @@ publish.workspace = true
 
 [dependencies]
 assert_fs.workspace = true
+ccusage-objectstore.workspace = true
 jiff.workspace = true
 sqlite.workspace = true

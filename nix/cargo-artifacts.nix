@@ -28,6 +28,7 @@ let
     "ccusage-cli"
     "ccusage-core"
     "ccusage-adapter-common"
+    "ccusage-objectstore"
     "ccusage-terminal"
     "ccusage-test-support"
   ];

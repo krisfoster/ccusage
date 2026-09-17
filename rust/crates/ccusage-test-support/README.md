@@ -10,6 +10,10 @@ Test-only helpers: filesystem fixtures and environment-variable guards.
   reads and restore them when the test ends.
 - `zcode::create_fixture` — create the representative ZCode SQLite schema and
   usage rows shared by adapter and unified report tests.
+- `objectstore::MemoryStore` and `objectstore::Fault` — an in-memory `ObjectStore`
+  with GCS-shaped generations, so CAS loops and retry policy are testable without
+  a bucket, and queued faults put a 412, 429, 5xx or dropped connection exactly
+  where a test wants one.
 
 Every crate that has tests uses this as a dev-dependency; nothing depends on it
 at runtime.
@@ -19,11 +23,14 @@ at runtime.
 - `EnvVarGuard`
 - `EnvVarsGuard`
 - `Fixture`
+- `objectstore::Fault`
+- `objectstore::MemoryStore`
 - `zcode::create_fixture`
 
 ## Depends on
 
 - `assert_fs`
+- `ccusage-objectstore`
 - `jiff`
 - `sqlite`
 
