@@ -497,6 +497,7 @@ version = "0.0.0"
 dependencies = [
  "ccusage-test-support",
  "getrandom 0.4.3",
+ "jiff",
  "serde",
  "serde_json",
  "sha2",

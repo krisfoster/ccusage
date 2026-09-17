@@ -5,11 +5,13 @@
 //! testable without a bucket: the manifest user ID and the configured values
 //! arrive as inputs and the caller decides what to persist or upload.
 pub mod fingerprint;
+pub mod fold;
 pub mod identity;
 pub mod salt;
 pub mod shard;
 
 pub use fingerprint::{FingerprintSources, observe_fingerprint};
+pub use fold::{FoldContext, FoldEntry, fold, utc_date_and_bucket};
 pub use identity::{
     IdentityError, IdentityInputs, IdentityOrigin, IdentityWarning, MachineId, ResolvedIdentity,
     UserId, hash_identifier, os_entropy, resolve_identity,
