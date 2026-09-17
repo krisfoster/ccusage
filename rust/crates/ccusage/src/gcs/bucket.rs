@@ -377,10 +377,6 @@ enum Method {
     Put,
 }
 
-/// The condition that keeps `allUsers` inside the public prefix.
-///
-/// Taken from the key builder rather than from a caller-supplied string, so the
-/// grant cannot drift away from the only prefix that produces public keys.
 fn parse_bucket(bucket: &str, body: &[u8]) -> Result<BucketInfo> {
     let value: Value = serde_json::from_slice(body).map_err(|error| ObjectStoreError::Other {
         detail: format!("unreadable bucket resource for {bucket}: {error}"),
