@@ -166,6 +166,19 @@ you exported or quoted a total before it moved. A run that reports this
 repeatedly for the same day usually means a clock problem or a log being
 rewritten after the fact.
 
+### Machines that see the same logs
+
+If two machines read the same usage logs — a synced home directory, a restored
+backup — both upload them, and the totals count them once. Each 15-minute
+activity bucket carries a set of per-message fingerprints, and when one
+machine's set is wholly contained in another's, one copy is left out of the
+totals rather than added to them.
+
+An overlap that is only partial is never suppressed: the two machines really did
+see some of the same messages and some different ones, so both are counted and
+the bucket is flagged for the dashboard instead. Suppression is recomputed from
+scratch on every sync, so removing a machine restores whatever it was masking.
+
 Uploaded days hold token counts, costs, and 15-minute activity buckets. Project
 paths are hashed with your bucket's salt before upload, and prompts, file
 contents, and file paths are never uploaded.
