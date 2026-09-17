@@ -101,7 +101,10 @@ export default defineConfig({
 				},
 				{
 					text: 'Integration',
-					items: [{ text: 'JSON Output', link: '/guide/json-output' }],
+					items: [
+						{ text: 'JSON Output', link: '/guide/json-output' },
+						{ text: 'Cloud Sync', link: '/guide/cloud-sync' },
+					],
 				},
 				{
 					text: 'Community',
