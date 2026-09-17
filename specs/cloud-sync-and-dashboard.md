@@ -200,11 +200,13 @@ flags and no console visits.
 2. **`gcloud` installed but no ADC** → offer to run `gcloud auth application-default login` for the
    user (one browser consent, owned by Google's own verified client — no ccusage OAuth client
    needed).
-3. **No `gcloud`** → built-in browser flow: loopback redirect + PKCE against a ccusage-registered
-   installed-app client, refresh token stored in the OS keychain (or a `0600` file). Gated on S9;
-   if verification for the sensitive scope is a blocker, this rung is skipped in v1.
-4. **Headless / CI / "just give me keys"** → paste an HMAC access id + secret (or point at a
-   service-account JSON). This is also the rung that makes the same code work for S3/R2 later.
+3. ~~**No `gcloud`** → built-in browser flow.~~ **Cut from v1 by DR-05** — the scopes are
+   sensitive, so an unverified ccusage client would be capped at 100 test users. Users without
+   `gcloud` go to rung 4.
+4. **Headless / CI / "just give me keys"** → paste an HMAC access id + secret. This is also the
+   rung that makes the same code work for S3/R2 later. Service-account JSON is *not* accepted as
+   implemented (DR-11): it would need an RSA signer in the binary, and the error says so and points
+   at the HMAC rung instead.
 
 Project selection: if exactly one project is visible, use it; otherwise show a picker; if none,
 print the exact `gcloud projects create` + billing-link steps (S10). The chosen project is written
@@ -216,11 +218,10 @@ to `sync.projectId`.
 name := sync.bucket  ||  "ccusage-" + userIdShort + "-" + rand4     // lowercase, ≤63 chars
 GET  b/<name>                    → 200 and we can write  ⇒ reuse, done
                                  → 404                   ⇒ create
-POST b?project=<projectId>  { uniformBucketLevelAccess: true,
-                              publicAccessPrevention: "enforced",   // relaxed only for §6.4 opt-in
+POST b?project=<projectId>  { uniformBucketLevelAccess: true,          // conditions need it
+                              publicAccessPrevention: "inherited",     // see DR-11
                               location: <user choice, default multi-region of their project>,
-                              softDeletePolicy: 7d, versioning: false,
-                              lifecycle: [abort incomplete uploads] }
+                              softDeletePolicy: 0, versioning: false }
                                  → 409 owned by someone else ⇒ retry with a fresh rand4 suffix
                                  → 403                        ⇒ explain the missing role, exit
 ```
@@ -239,10 +240,10 @@ user) rather than creating anything. `sync setup` refuses to create a second buc
     "projectId": "my-gcp-project",
     "bucket": "ccusage-9f3a1c2b-7q4d",   // resolved once by `sync setup`, then permanent
     "prefix": "ccusage/v1",
-    "auth": { "kind": "hmac", "accessKeyEnv": "CCUSAGE_SYNC_ACCESS_KEY",
-              "secretEnv": "CCUSAGE_SYNC_SECRET" },
-    "machineId": "laptop-work",           // optional human label; default = hashed fingerprint
-    "userId": "kris",                      // optional; default = hash(email or username)
+    "auth": { "kind": "auto" },           // "auto" walks §4.3; "hmac" pins the env pair
+    "machineId": "9f3a1c2b…",             // random 128-bit, minted once (DR-03)
+    "machineLabel": "laptop-work",        // optional display name
+    "userId": "7q4d…",                    // from the bucket manifest, or minted (DR-04)
     "agents": ["claude", "codex"],          // default: all detected
     "redactProjects": true,                 // default true
     "dashboard": { "deploy": true, "public": true, "encrypt": false }  // see §6.4: public page, private data
@@ -256,13 +257,21 @@ with it).
 
 ### 4.3 Credentials — never in the config file
 
-Resolution order, first hit wins:
-1. `CCUSAGE_SYNC_*` env vars (HMAC pair, or `CCUSAGE_SYNC_OAUTH_TOKEN`).
-2. `auth.accessKeyEnv` / `auth.secretEnv` indirection as above.
-3. OS keychain entry `ccusage/sync/<bucket>` (behind a feature flag if `keyring` costs too much size).
-4. A referenced credential file (`auth.credentialsFile`, e.g. a service-account JSON), mode-checked
-   (warn if world-readable).
-5. ADC: `gcloud auth print-access-token` / `application_default_credentials.json` / metadata server.
+Resolution order as implemented in P1-05, first hit wins:
+1. `CCUSAGE_SYNC_ACCESS_TOKEN` — a pre-minted bearer token, for CI.
+2. `CCUSAGE_SYNC_HMAC_ACCESS_ID` + `CCUSAGE_SYNC_HMAC_SECRET` — both or neither; half a pair is an
+   error rather than a silent fall-through to the next rung.
+3. `GOOGLE_APPLICATION_CREDENTIALS`. An explicitly configured path that fails is an error, never a
+   fall-through: falling back would use an identity the user did not ask for.
+4. The well-known ADC file (`~/.config/gcloud/application_default_credentials.json`).
+5. `gcloud auth print-access-token`.
+6. The metadata server, when one is configured or reachable.
+
+Authorized-user ADC files are exchanged for an access token over the refresh-token grant; tokens
+are cached until 60s before expiry. Service-account and external-account files are rejected with
+remediation (DR-11). Exhausting the ladder produces an error that names every rung tried, since
+"no credentials" with no provenance is unactionable. An OS keychain rung (P1-07) is optional and
+not yet built.
 
 `ccusage sync setup` writes the non-secret block to config and tells the user exactly which env var
 or keychain entry to populate; it never echoes a secret and never writes one to the repo-local
@@ -502,8 +511,8 @@ bucket is therefore split into two access domains:
 
 With uniform bucket-level access this is one **conditional** IAM binding: `allUsers` →
 `roles/storage.objectViewer` with `resource.name.startsWith("projects/_/buckets/<B>/objects/<prefix>/dashboard/")`,
-and public access prevention relaxed for the bucket (S12 verifies the condition syntax and that no
-org policy forbids it). Nothing else in the bucket is reachable without credentials, so an
+and public access prevention left `inherited` for the bucket (DR-11; S12 verifies the condition
+syntax and that no org policy forbids it). Nothing else in the bucket is reachable without credentials, so an
 anonymous visitor gets a working page that renders an empty state and a "Sign in" button.
 
 **Primary data path — viewer signs in (real IAM).** The page runs a Google Identity Services
@@ -723,6 +732,28 @@ object, on the condition that the copyright notice and permission notice travel 
 **Decision.** Publishing prices is permitted. P4-05 must write the MIT notice as a sibling object
 (`dashboard/licenses/litellm-LICENSE.txt`) and the dashboard must carry a visible attribution line
 plus the snapshot date. The equivalence map stays editorial and separate from the licensed data.
+
+### DR-11 — Bucket access shape as implemented (P1-06)
+
+Implementing bucket administration forced three details the earlier prose left contradictory.
+
+1. **Public access prevention is created `inherited`, not `enforced`.** `enforced` refuses the
+   `allUsers` binding outright, so §4.1.2's original `enforced` default would have made the
+   dashboard impossible without a later relaxation step that nothing owned. Containment comes from
+   the *condition* instead: the binding is scoped to `KeySpace::public_prefix()`, which is the same
+   string `dashboard_asset` builds keys from, so the grant cannot reach past the public prefix. A
+   user who never publishes a dashboard can set `enforced` and lose nothing.
+2. **Soft delete is created off (`0`), not 7 days.** The default keeps deleted objects billable for
+   a week; on a bucket this small the surprise is worth more than the recovery window, and the data
+   is reproducible from local logs.
+3. **A create that loses a race re-reads rather than fails.** Two machines running `sync setup`
+   against one name is normal, so 409 (mapped onto `Conflict` alongside 412) is resolved by reading
+   the winner's bucket. A 403 is *not* folded into "absent": "someone else owns this name" and
+   "this name is free" lead to opposite next steps.
+
+Also settled here: share links are signed through the IAM Credentials `signBlob` API, so v1 needs
+no private key on the machine and no RSA implementation in the binary. That is what lets DR-05's
+cut stand without stranding headless users.
 
 ### Still open
 
