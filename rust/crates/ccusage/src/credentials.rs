@@ -32,6 +32,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ccusage_cli::SyncAuthMode;
 use ccusage_objectstore::{HmacKey, ObjectStoreError, Result};
 
 use crate::gcs::Authorizer;
@@ -301,6 +302,7 @@ pub(crate) struct Resolver {
     metadata_endpoint: String,
     probe_metadata: bool,
     runner: CommandRunner,
+    mode: SyncAuthMode,
 }
 
 impl Default for Resolver {
@@ -320,7 +322,15 @@ impl Resolver {
             // connection attempt to a link-local address on every sync.
             probe_metadata: false,
             runner: Arc::new(run_gcloud),
+            mode: SyncAuthMode::Auto,
         }
+    }
+
+    /// Narrows the ladder to the rungs the user asked for. An explicit mode that
+    /// finds nothing fails rather than quietly authenticating as somebody else.
+    pub(crate) fn with_mode(mut self, mode: SyncAuthMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub(crate) fn with_env(mut self, env: HashMap<String, String>) -> Self {
@@ -353,8 +363,13 @@ impl Resolver {
     /// rung that was tried.
     pub(crate) fn resolve(self) -> Result<Credentials> {
         let mut tried: Vec<String> = Vec::new();
+        let env_rungs = matches!(self.mode, SyncAuthMode::Auto | SyncAuthMode::Hmac);
+        let adc_rungs = matches!(self.mode, SyncAuthMode::Auto | SyncAuthMode::Adc);
 
-        if let Some(token) = self.non_empty("CCUSAGE_SYNC_ACCESS_TOKEN") {
+        if let Some(token) = self
+            .non_empty("CCUSAGE_SYNC_ACCESS_TOKEN")
+            .filter(|_| matches!(self.mode, SyncAuthMode::Auto))
+        {
             return Ok(self.credentials(
                 CredentialSource::EnvAccessToken,
                 TokenKind::Static(token.to_string()),
@@ -363,15 +378,20 @@ impl Resolver {
         tried.push(CredentialSource::EnvAccessToken.to_string());
 
         if let (Some(access_id), Some(secret)) = (
-            self.non_empty("CCUSAGE_SYNC_HMAC_ACCESS_ID"),
-            self.non_empty("CCUSAGE_SYNC_HMAC_SECRET"),
+            self.non_empty("CCUSAGE_SYNC_HMAC_ACCESS_ID")
+                .filter(|_| env_rungs),
+            self.non_empty("CCUSAGE_SYNC_HMAC_SECRET")
+                .filter(|_| env_rungs),
         ) {
             let key = HmacKey::new(access_id, secret);
             return Ok(self.credentials(CredentialSource::EnvHmac, TokenKind::Hmac(key)));
         }
         tried.push(CredentialSource::EnvHmac.to_string());
 
-        if let Some(path) = self.non_empty("GOOGLE_APPLICATION_CREDENTIALS") {
+        if let Some(path) = self
+            .non_empty("GOOGLE_APPLICATION_CREDENTIALS")
+            .filter(|_| adc_rungs)
+        {
             let path = PathBuf::from(path);
             let source = CredentialSource::CredentialFile(path.clone());
             // An explicitly pointed-at file that does not work is an error, not
@@ -381,7 +401,7 @@ impl Resolver {
         }
         tried.push("GOOGLE_APPLICATION_CREDENTIALS".to_string());
 
-        if let Some(path) = self.adc_path() {
+        if let Some(path) = self.adc_path().filter(|_| adc_rungs) {
             let source = CredentialSource::ApplicationDefault(path.clone());
             if path.exists() {
                 let kind = self.read_credential_file(&path, &source)?;
@@ -390,7 +410,11 @@ impl Resolver {
             tried.push(source.to_string());
         }
 
-        match (self.runner)() {
+        match if adc_rungs {
+            (self.runner)()
+        } else {
+            Err(format!("skipped by --auth {}", mode_flag(self.mode)))
+        } {
             Ok(token) if !token.trim().is_empty() => {
                 return Ok(self.credentials(CredentialSource::GcloudCli, TokenKind::Gcloud));
             }
@@ -398,7 +422,7 @@ impl Resolver {
             Err(detail) => tried.push(format!("{} ({detail})", CredentialSource::GcloudCli)),
         }
 
-        if self.probe_metadata || self.env.contains_key("GCE_METADATA_HOST") {
+        if adc_rungs && (self.probe_metadata || self.env.contains_key("GCE_METADATA_HOST")) {
             let endpoint = self.non_empty("GCE_METADATA_HOST").map_or_else(
                 || self.metadata_endpoint.clone(),
                 |host| format!("http://{host}"),
@@ -413,9 +437,10 @@ impl Resolver {
         Err(ObjectStoreError::Unauthenticated {
             source: "credential ladder".to_string(),
             detail: format!(
-                "no Google credentials found; tried {}. Run `gcloud auth application-default login`, \
-                 or set CCUSAGE_SYNC_HMAC_ACCESS_ID and CCUSAGE_SYNC_HMAC_SECRET for a headless machine",
-                tried.join(", ")
+                "no Google credentials found for --auth {}; tried {}. {}",
+                mode_flag(self.mode),
+                tried.join(", "),
+                remediation(self.mode)
             ),
         })
     }
@@ -526,8 +551,52 @@ impl Resolver {
     }
 }
 
+fn mode_flag(mode: SyncAuthMode) -> &'static str {
+    match mode {
+        SyncAuthMode::Auto => "auto",
+        SyncAuthMode::Adc => "adc",
+        SyncAuthMode::Hmac => "hmac",
+    }
+}
+
+fn remediation(mode: SyncAuthMode) -> &'static str {
+    match mode {
+        SyncAuthMode::Auto => {
+            "Run `gcloud auth application-default login`, or set CCUSAGE_SYNC_HMAC_ACCESS_ID and \
+             CCUSAGE_SYNC_HMAC_SECRET for a headless machine"
+        }
+        SyncAuthMode::Adc => "Run `gcloud auth application-default login`",
+        SyncAuthMode::Hmac => {
+            "Set CCUSAGE_SYNC_HMAC_ACCESS_ID and CCUSAGE_SYNC_HMAC_SECRET, or drop --auth hmac to \
+             use application default credentials"
+        }
+    }
+}
+
+/// gcloud is always spawned from a resolved absolute path and never through a
+/// shell, so a writable relative `PATH` entry cannot substitute a different
+/// binary between the check and the call.
+pub(crate) fn gcloud_program(env: &HashMap<String, String>) -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["gcloud.cmd", "gcloud.exe", "gcloud"]
+    } else {
+        &["gcloud"]
+    };
+    std::env::split_paths(env.get("PATH").map_or("", String::as_str))
+        .filter(|directory| directory.is_absolute())
+        .flat_map(|directory| {
+            names
+                .iter()
+                .map(move |name| directory.join(name))
+                .collect::<Vec<_>>()
+        })
+        .find(|candidate| candidate.is_file())
+}
+
 fn run_gcloud() -> std::result::Result<String, String> {
-    let output = Command::new("gcloud")
+    let program =
+        gcloud_program(&std::env::vars().collect()).ok_or_else(|| "not on PATH".to_string())?;
+    let output = Command::new(program)
         .args(["auth", "print-access-token"])
         .output()
         .map_err(|error| error.to_string())?;
@@ -573,6 +642,7 @@ fn form_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{CredentialSource, Resolver};
+    use ccusage_cli::SyncAuthMode;
     use ccusage_objectstore::ObjectStoreError;
     use ccusage_test_support::http_server::{ScriptedServer, json_response as json};
     use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
@@ -619,6 +689,43 @@ mod tests {
 
         assert_eq!(credentials.source(), &CredentialSource::EnvAccessToken);
         assert_eq!(credentials.access_token().expect("token"), "ya29.static");
+    }
+
+    #[test]
+    fn adc_mode_ignores_the_environment_credentials() {
+        let (_dir, path) = write_credential_file("adc.json", AUTHORIZED_USER);
+
+        let credentials = resolver(&[
+            ("CCUSAGE_SYNC_ACCESS_TOKEN", "ya29.static"),
+            ("CCUSAGE_SYNC_HMAC_ACCESS_ID", "GOOG1EXAMPLE"),
+            ("CCUSAGE_SYNC_HMAC_SECRET", "secret"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", &path.to_string_lossy()),
+        ])
+        .with_mode(SyncAuthMode::Adc)
+        .resolve()
+        .expect("resolve");
+
+        assert_eq!(
+            credentials.source(),
+            &CredentialSource::CredentialFile(path)
+        );
+    }
+
+    #[test]
+    fn hmac_mode_does_not_fall_back_to_application_default_credentials() {
+        let (_dir, path) = write_credential_file("adc.json", AUTHORIZED_USER);
+
+        let error = resolver(&[("GOOGLE_APPLICATION_CREDENTIALS", &path.to_string_lossy())])
+            .with_mode(SyncAuthMode::Hmac)
+            .resolve()
+            .expect_err("--auth hmac must not authenticate as somebody else");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("CCUSAGE_SYNC_HMAC_ACCESS_ID"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("adc.json"), "{rendered}");
     }
 
     #[test]
