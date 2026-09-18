@@ -762,6 +762,124 @@ mod tests {
         );
     }
 
+    /// Drives `respond` over a real socket: the header parsing, the Host
+    /// check and the framing are the parts a browser meets first, and a test
+    /// that called the helpers directly would skip all three.
+    fn request(line: &str, host: Option<&str>) -> String {
+        use std::io::Read as _;
+
+        let listener =
+            TcpListener::bind(SocketAddr::from((LOCAL_HOST, 0))).expect("a loopback port");
+        let port = listener.local_addr().expect("an address").port();
+        let request = match host {
+            Some(host) => format!("{line} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+            None => format!("{line} HTTP/1.1\r\n\r\n"),
+        };
+        let client = std::thread::spawn(move || {
+            let mut stream =
+                TcpStream::connect(SocketAddr::from((LOCAL_HOST, port))).expect("a connection");
+            stream.write_all(request.as_bytes()).expect("a request");
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).expect("a response");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let (stream, _) = listener.accept().expect("a connection");
+        let data = vec![(
+            "data/daily.json".to_string(),
+            br#"{"schema":1,"days":{}}"#.to_vec(),
+        )];
+        let public = vec![(
+            "pricing.json".to_string(),
+            br#"{"models":{}}"#.to_vec(),
+            "application/json",
+        )];
+        respond(stream, &data, &public).expect("a served response");
+        client.join().expect("the client thread")
+    }
+
+    #[test]
+    fn a_bare_request_is_answered_with_the_page_and_no_store() {
+        let response = request("GET /", Some("127.0.0.1:8787"));
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("Content-Type: text/html"), "{response}");
+        assert!(response.contains("Cache-Control: no-store"), "{response}");
+        assert!(response.contains("X-Content-Type-Options: nosniff"), "{response}");
+        assert!(response.contains("<title>ccusage</title>"), "{response}");
+    }
+
+    #[test]
+    fn the_rollups_and_the_price_table_are_served_alongside_the_page() {
+        let rollup = request("GET /data/daily.json", Some("localhost:8787"));
+        let prices = request("GET /pricing.json?v=2", Some("localhost:8787"));
+
+        assert!(rollup.contains("application/json"), "{rollup}");
+        assert!(rollup.ends_with(r#"{"schema":1,"days":{}}"#), "{rollup}");
+        assert!(prices.ends_with(r#"{"models":{}}"#), "{prices}");
+    }
+
+    #[test]
+    fn an_unknown_path_is_a_404_rather_than_the_page() {
+        let response = request("GET /../etc/passwd", Some("localhost"));
+
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        assert!(response.ends_with("not found"), "{response}");
+    }
+
+    /// A page on the internet can point a name it owns at 127.0.0.1 and then
+    /// read whatever answers, which here is the user's spend.
+    #[test]
+    fn a_request_addressed_to_someone_elses_name_is_refused() {
+        let rebound = request("GET /data/daily.json", Some("spend.attacker.example:8787"));
+        let anonymous = request("GET /", None);
+
+        assert!(rebound.starts_with("HTTP/1.1 403 Forbidden"), "{rebound}");
+        assert!(!rebound.contains("schema"), "{rebound}");
+        assert!(anonymous.starts_with("HTTP/1.1 403 Forbidden"), "{anonymous}");
+    }
+
+    #[test]
+    fn the_local_server_binds_loopback_only() {
+        let listener = bind_local().expect("a listener");
+
+        let address = listener.local_addr().expect("an address");
+
+        assert!(address.ip().is_loopback(), "{address}");
+        assert!(
+            (FIRST_PORT..=LAST_PORT).contains(&address.port()) || address.port() > 0,
+            "{address}"
+        );
+    }
+
+    #[test]
+    fn a_link_lifetime_is_described_in_the_largest_unit_that_fits() {
+        assert_eq!(human_ttl(600), "10 minute(s)");
+        assert_eq!(human_ttl(7_200), "2 hour(s)");
+        assert_eq!(human_ttl(172_800), "2 day(s)");
+    }
+
+    #[test]
+    fn the_published_page_url_points_at_the_public_prefix() {
+        let keys = KeySpace::new("ccusage/v1").expect("key space");
+
+        let url = public_url("my-bucket-dashboard", &keys);
+
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/my-bucket-dashboard/ccusage/v1/dashboard/index.html"
+        );
+    }
+
+    /// V4 signing wants a basic-format timestamp, and a signature built from a
+    /// stamp the server reads differently fails with an opaque 403.
+    #[test]
+    fn the_signing_timestamp_drops_its_separators_and_its_milliseconds() {
+        assert_eq!(rfc3339(1_767_225_600), "2026-01-01T00:00:00Z");
+        assert_eq!(basic_timestamp(1_767_225_600), "20260101T000000Z");
+        assert!(now_secs() > 1_700_000_000);
+    }
+
     #[test]
     fn only_loopback_host_names_are_answered() {
         assert!(host_is_loopback("127.0.0.1:8787"));

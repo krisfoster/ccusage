@@ -396,7 +396,7 @@ function axisTop(peak) {
 	return step * magnitude;
 }
 
-const CHART = { minWidth: 280, maxWidth: 960, height: 220, left: 56, right: 8, top: 10, bottom: 28 };
+const CHART = { minWidth: 280, height: 220, left: 56, right: 8, top: 10, bottom: 28 };
 
 /**
  * The daily chart, drawn as SVG with both axes.
@@ -482,11 +482,13 @@ function series(days, width) {
 
 let chartWidth = 0;
 
-/** Redraws the chart at the width its panel currently offers. */
+/**
+ * Redraws the chart at the width its panel currently offers, in CSS pixels, so
+ * the drawing is never scaled and the tick text keeps the size it asks for.
+ */
 function drawSeries() {
 	const host = document.getElementById('series');
-	const offered = host.clientWidth || CHART.maxWidth;
-	const width = Math.round(Math.min(CHART.maxWidth, Math.max(CHART.minWidth, offered)));
+	const width = Math.round(Math.max(CHART.minWidth, host.clientWidth || CHART.minWidth));
 	if (width === chartWidth && host.firstChild) return;
 	chartWidth = width;
 	host.replaceChildren(series(state.days, width));
@@ -632,8 +634,17 @@ function timezones() {
 
 async function main() {
 	timezones();
+	// The redraw changes the box being observed, which inside the callback is
+	// what raises "ResizeObserver loop completed with undelivered
+	// notifications"; deferring it to the next frame keeps the two apart.
+	let queued = false;
 	new ResizeObserver(() => {
-		if (state.days) drawSeries();
+		if (!state.days || queued) return;
+		queued = true;
+		requestAnimationFrame(() => {
+			queued = false;
+			drawSeries();
+		});
 	}).observe(document.getElementById('series'));
 	try {
 		state.data = await load();
