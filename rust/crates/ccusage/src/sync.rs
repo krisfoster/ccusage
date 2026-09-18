@@ -386,8 +386,8 @@ fn provision_signer(
             println!(
                 "Could not set up dashboard share links: {error}\n\
                  Sync itself is unaffected, and `ccusage sync dashboard` still works locally. \
-                 Re-run setup once the project allows creating a service account to publish a \
-                 readable dashboard."
+                 Re-running setup picks up where this left off; if the project refuses the \
+                 signer account, the message above names the permission it wants."
             );
         }
     }
