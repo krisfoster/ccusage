@@ -1927,6 +1927,18 @@ fn sync_remove_deletes_nothing_extra_unless_asked() {
 }
 
 #[test]
+fn sync_share_turns_sharing_on_by_default_and_off_with_disable() {
+    assert_eq!(
+        sync_args(&["ccusage", "sync", "share"]).command,
+        SyncCommand::Share(SyncShareArgs { disable: false })
+    );
+    assert_eq!(
+        sync_args(&["ccusage", "sync", "share", "--disable"]).command,
+        SyncCommand::Share(SyncShareArgs { disable: true })
+    );
+}
+
+#[test]
 fn sync_dashboard_share_links_default_to_a_day() {
     let args = sync_args(&[
         "ccusage",

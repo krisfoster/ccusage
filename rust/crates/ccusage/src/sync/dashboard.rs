@@ -13,12 +13,14 @@
 //!   it will actually enforce is the bucket. The rollups stay in the private
 //!   data bucket, so a deployed page is only readable through a share link,
 //!   whose signed URLs ride in the location fragment and therefore never reach
-//!   a server log. `--deploy` mints that link itself: publishing a page that
-//!   shows nothing, and telling the user to run a second command, was the
-//!   whole of the old experience.
+//!   a server log. `--deploy` mints that link itself, so publishing and making
+//!   the page readable are not two commands.
 //!
-//! The signing key belongs to the dedicated service account `sync setup`
-//! creates, and is read from this machine's state directory rather than from
+//! Both of those need a signing key, which `ccusage sync share` creates:
+//! deploying refuses without one rather than publishing a page that shows
+//! nothing, and rather than creating a service account in the user's project
+//! as a side effect of asking for a URL. The key belongs to that dedicated
+//! account and is read from this machine's state directory rather than from
 //! the user's environment.
 //!
 //! The public/private split is enforced twice over: by the bucket, and by the
@@ -49,9 +51,8 @@ use crate::{
     cli::SyncDashboardArgs,
     cli_error,
     gcs::{
-        Authorizer, GcsStore, JsonApi, RetryPolicy,
+        GcsStore, JsonApi, RetryPolicy,
         bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
-        signer::SignerAdmin,
     },
     pricing::PricingMap,
 };
@@ -93,6 +94,18 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
 
     let assets_bucket = assets_bucket(&bucket);
 
+    // Before deploying, not after: publishing a page that cannot read anything
+    // and then reporting the problem leaves a public bucket the user never
+    // asked for standing behind the error.
+    let signer = if args.deploy || args.share {
+        Some(
+            signing_key(&share::default_path(), &bucket, credentials.hmac_key())
+                .ok_or_else(|| cli_error(share::NOT_ENABLED.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     if args.deploy {
         let Some(project) = status.project_id.clone() else {
             return Err(cli_error(
@@ -112,30 +125,23 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
         )?;
     }
 
-    // Deploying always wants a link: the published page can read nothing
+    // Deploying always mints the link: the published page can read nothing
     // without one, so treating `--deploy` as "publish, then tell the user to
     // run --share" is just a slower way of reaching the same place.
-    let link = if args.share || args.deploy {
-        match signing_key(&bucket, status.project_id.as_deref(), &credentials) {
-            Some(hmac) => Some(share_link(
+    let link = signer
+        .map(|hmac| {
+            share_link(
                 &bucket,
                 &assets_bucket,
                 &keys,
                 &hmac,
                 args.share_ttl_seconds,
-            )?),
-            None if args.share => return Err(cli_error(NO_SIGNER.to_string())),
-            None => {
-                println!("\n{NO_SIGNER}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+            )
+        })
+        .transpose()?;
 
-    match (args.deploy || args.share, &link) {
-        (true, Some(link)) => {
+    match &link {
+        Some(link) => {
             println!(
                 "\nShare link (expires in {}):",
                 human_ttl(args.share_ttl_seconds)
@@ -150,69 +156,24 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             }
             Ok(())
         }
-        (true, None) => {
-            let url = public_url(&assets_bucket, &keys);
-            println!("\nDashboard: {url}");
-            println!(
-                "The page is public; the usage data is not, and without a signing key this \
-                 page can read none of it."
-            );
-            if args.open {
-                open_in_browser(&url);
-            }
-            Ok(())
-        }
-        (false, _) => serve_locally(&store, &keys, &public, args.open),
+        None => serve_locally(&store, &keys, &public, args.open),
     }
 }
 
-const NO_SIGNER: &str = "This machine has no key to sign a share link with, and one could not be \
-                         created. Re-run `ccusage sync setup` once the project allows creating a \
-                         service account, or host the dashboard locally with `ccusage sync \
-                         dashboard`.";
-
-/// The key that signs share links, in preference order: the one setup stored,
-/// an HMAC credential the user authenticated with, or one minted now.
+/// The key that signs share links: the one `sync share` stored, or an HMAC
+/// credential the user authenticated with directly.
 ///
-/// Minting here is what makes the feature work for buckets set up before setup
-/// learned to provision a signer — otherwise every such user meets an error
-/// telling them to re-run a command they already ran. It is idempotent: the
-/// account and the key are created once and reused from disk afterwards.
+/// Nothing is minted here. Creating a service account is a change to the
+/// user's project, and a command that publishes a page should not make one as
+/// a side effect — `ccusage sync share` is where that is asked for.
 fn signing_key(
+    signer_path: &std::path::Path,
     bucket: &str,
-    project: Option<&str>,
-    credentials: &Arc<crate::credentials::Credentials>,
+    credential_key: Option<&HmacKey>,
 ) -> Option<HmacKey> {
-    let path = share::default_path();
-    if let Some(stored) = share::load(&path, bucket) {
-        return Some(stored.hmac_key());
-    }
-    if let Some(hmac) = credentials.hmac_key() {
-        return Some(hmac.clone());
-    }
-    let project = project?;
-    let admin = BucketAdmin::new(
-        JsonApi::new(
-            STORAGE_ENDPOINT,
-            Box::new(Arc::clone(credentials)),
-            RetryPolicy::default(),
-        ),
-        bucket,
-    );
-    let signer_admin = SignerAdmin::new(project, Arc::clone(credentials) as Arc<dyn Authorizer>);
-    match share::ensure(&signer_admin, &admin, bucket, &path) {
-        Ok((signer, _)) => {
-            println!(
-                "Share links are signed by {}, created for this bucket.",
-                signer.service_account
-            );
-            Some(signer.hmac_key())
-        }
-        Err(error) => {
-            println!("Could not create a signing key: {error}");
-            None
-        }
-    }
+    share::load(signer_path, bucket)
+        .map(|stored| stored.hmac_key())
+        .or_else(|| credential_key.cloned())
 }
 
 /* ------------------------------------------------------------------ deploy */
@@ -671,6 +632,47 @@ fn base64url(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--deploy` and `--share` are refused before `sync share` has run, and
+    /// a signer left over from a different bucket does not count as having
+    /// run: it signs links the data bucket rejects.
+    #[test]
+    fn a_bucket_sharing_was_never_enabled_for_has_no_signing_key() {
+        let directory = assert_fs::TempDir::new().expect("temp dir");
+        let path = directory.path().join("sync-signer.json");
+        assert!(signing_key(&path, "usage-bucket", None).is_none());
+
+        share::save(
+            &path,
+            &share::StoredSigner {
+                bucket: "another-bucket".to_string(),
+                service_account: "ccusage-dashboard@example.iam.gserviceaccount.com".to_string(),
+                access_id: "GOOG1EACCESS".to_string(),
+                secret: "secret".to_string(),
+            },
+        )
+        .expect("the signer is written");
+        assert!(signing_key(&path, "usage-bucket", None).is_none());
+    }
+
+    #[test]
+    fn the_signer_sync_share_stored_is_what_signs_the_link() {
+        let directory = assert_fs::TempDir::new().expect("temp dir");
+        let path = directory.path().join("sync-signer.json");
+        share::save(
+            &path,
+            &share::StoredSigner {
+                bucket: "usage-bucket".to_string(),
+                service_account: "ccusage-dashboard@example.iam.gserviceaccount.com".to_string(),
+                access_id: "GOOG1EACCESS".to_string(),
+                secret: "secret".to_string(),
+            },
+        )
+        .expect("the signer is written");
+
+        let key = signing_key(&path, "usage-bucket", None).expect("a signing key");
+        assert_eq!(key.access_id, "GOOG1EACCESS");
+    }
 
     fn pricing() -> PricingMap {
         PricingMap::load_with_overrides(true, false, std::collections::BTreeMap::new().iter())

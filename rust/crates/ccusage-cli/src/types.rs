@@ -63,6 +63,7 @@ pub enum SyncCommand {
     Forget(SyncForgetArgs),
     MergeMachine(SyncMergeMachineArgs),
     Remove(SyncRemoveArgs),
+    Share(SyncShareArgs),
     Dashboard(SyncDashboardArgs),
 }
 
@@ -78,6 +79,7 @@ impl SyncCommand {
             Self::Forget(_) => "forget",
             Self::MergeMachine(_) => "merge-machine",
             Self::Remove(_) => "remove",
+            Self::Share(_) => "share",
             Self::Dashboard(_) => "dashboard",
         }
     }
@@ -126,6 +128,15 @@ pub struct SyncRemoveArgs {
     pub dry_run: bool,
     /// Empties the key prefix but leaves the buckets themselves.
     pub keep_bucket: bool,
+}
+
+/// Turning share links on or off. Publishing is opt-in: it creates a service
+/// account and a long-lived key, which is not something `sync setup` should do
+/// to a user who only wanted their usage backed up.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncShareArgs {
+    /// Revokes the key and deletes the account sharing was enabled with.
+    pub disable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

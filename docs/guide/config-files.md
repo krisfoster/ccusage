@@ -421,6 +421,26 @@ The top-level `sync` block records where usage is synced to. `ccusage sync setup
 }
 ```
 
+Setup writes `provider`, `projectId`, `bucket`, `location`, `prefix`, and the identity keys (`machineId`, `userId`, `salt`); leave those alone unless you are moving a machine deliberately, and see [Cloud Sync Setup](/guide/cloud-sync#setup). Three keys are yours to set:
+
+| Key              | Default | Effect                                                                                       |
+| ---------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `machineLabel`   | none    | Name shown for this machine in `ccusage sync status` and the dashboard's Machines panel      |
+| `redactProjects` | `true`  | Hash project names with the bucket salt before uploading; `false` uploads them in plain text |
+| `auth.kind`      | `auto`  | Credential source: `auto` walks the ladder, `adc` only gcloud credentials, `hmac` only a key |
+
+```json
+{
+	"$schema": "https://ccusage.com/config-schema.json",
+	"sync": {
+		"bucket": "ccusage-9f3a1c2b4405",
+		"machineLabel": "work-laptop",
+		"redactProjects": false,
+		"auth": { "kind": "adc" }
+	}
+}
+```
+
 ## Pricing Overrides
 
 ccusage looks up token costs from a LiteLLM pricing snapshot embedded in the binary, optionally refreshed at runtime (or skipped with `--offline`). When a model is missing from LiteLLM (private deployments, internal wrappers like Pi's `[pi] gpt-5.4`, custom proxies), or when the snapshot price differs from your contract, set `pricingOverrides` under `defaults` to supply per-model values.

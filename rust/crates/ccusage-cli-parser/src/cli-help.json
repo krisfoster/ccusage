@@ -527,6 +527,13 @@
 			"default": "false"
 		}
 	],
+	"sync_share_options": [
+		{
+			"flags": "--disable",
+			"description": "Revoke the signing key and delete the account it belongs to",
+			"default": "false"
+		}
+	],
 	"sync_dashboard_options": [
 		{
 			"flags": "--deploy",

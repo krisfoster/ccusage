@@ -798,19 +798,31 @@ The `signBlob` alternative settled above needs the caller to hold
 `roles/iam.serviceAccountTokenCreator` on a signing account, which is a grant setup cannot always
 make; it was offered and not chosen.
 
-**Decision.** `sync setup` provisions the signer itself: it creates or adopts
+**Decision.** ccusage provisions the signer itself: it creates or adopts
 `ccusage-dashboard@<project>.iam.gserviceaccount.com`, grants it `roles/storage.objectViewer` on
 the data bucket only, mints exactly one HMAC key, and stores it in this machine's state directory
 (`sync-signer.json`, mode `0600`) — not in `ccusage.json`, which is shared and whose loader rejects
-secret-looking keys outright. `--share` and `--deploy` read that key, and a machine without one
-mints it on first use, so setups predating this heal themselves. Provisioning is the last step of
-setup and non-fatal: a project that forbids service-account creation still gets sync and the local
-dashboard, and is told which permission is missing. `sync remove` deletes the keys, the account,
-and the local file.
+secret-looking keys outright. `--share` and `--deploy` read that key. `sync remove` deletes the
+keys, the account, and the local file.
 
 The credential at rest is the cost of the choice: a long-lived key that can read the usage data.
 It is scoped to one bucket, read-only, owner-only on disk, never printed, and deletable in one
 command — which is a better trade than a feature nobody can use.
+
+### DR-14 — Sharing is its own command, not a side effect of setup
+
+DR-13 put provisioning inside `sync setup` and minted lazily on first `--share`/`--deploy`. Both
+paths create an IAM principal as a side effect of a command the user ran for another reason, and
+both bury a slow, failure-prone step (a new service account is not usable for up to minutes, see
+the propagation wait) inside an otherwise fast one — so setup reported a scary partial failure to
+users who only wanted sync.
+
+**Decision.** `ccusage sync share` enables sharing, `--disable` revokes it, and neither setup nor
+the dashboard provisions anything implicitly. `--deploy`/`--share` check for the key before they
+publish anything and fail pointing at `sync share`; the local dashboard never needs it. Enabling
+and disabling are both idempotent, so a bucket set up before this existed enables sharing at any
+time, and the propagation wait belongs to the one command whose purpose is to wait for it.
+Disabling deletes the account's HMAC keys, the account, and the local file, and touches no data.
 
 ## 10. Threat model (P6-04)
 

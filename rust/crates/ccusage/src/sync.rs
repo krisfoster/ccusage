@@ -46,10 +46,9 @@ use crate::{
     cli::{SyncArgs, SyncAuthMode, SyncCommand, SyncSetupArgs},
     cli_error,
     gcs::{
-        Authorizer, GcsStore, JsonApi, RetryPolicy,
+        GcsStore, JsonApi, RetryPolicy,
         bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
         projects::ProjectCatalog,
-        signer::SignerAdmin,
     },
 };
 
@@ -74,6 +73,7 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
         SyncCommand::Remove(remove_args) => {
             remove::execute(&config, &remove_args, args.config.as_deref())
         }
+        SyncCommand::Share(share_args) => share::execute(&config, &share_args),
         SyncCommand::Dashboard(dashboard_args) => dashboard::execute(&config, &dashboard_args),
     }
 }
@@ -346,51 +346,12 @@ fn setup_sync(
     .map_err(cli_error)?;
     println!("Saved sync settings to {}.", path.display());
 
-    // Last, because it creates resources in the project: a setup that cannot
-    // write its own settings would otherwise leave a service account behind
-    // that nothing local remembers.
-    provision_signer(&project.id, &info.name, &admin, Arc::clone(&credentials));
+    println!(
+        "Publishing a dashboard other people can open needs a signing key, which \
+         `ccusage sync share` creates when you want one."
+    );
 
     Ok(())
-}
-
-/// Gives this machine a key that can sign dashboard share links.
-///
-/// Best effort, and deliberately not fatal: a user whose project forbids
-/// creating service accounts still wants the sync they asked for, and the
-/// local dashboard never needed a signer in the first place. The failure is
-/// reported where it happens rather than surfacing later as `--share` refusing
-/// with a message about environment variables.
-fn provision_signer(
-    project_id: &str,
-    bucket: &str,
-    admin: &BucketAdmin,
-    credentials: Arc<impl Authorizer + 'static>,
-) {
-    let signer_admin = SignerAdmin::new(project_id, credentials as Arc<dyn Authorizer>);
-    match share::ensure(&signer_admin, admin, bucket, &share::default_path()) {
-        Ok((signer, share::Provisioned::Existing)) => {
-            println!(
-                "Dashboard share links are signed by {}.",
-                signer.service_account
-            );
-        }
-        Ok((signer, share::Provisioned::Minted)) => {
-            println!(
-                "Created {} with read access to this bucket, and stored its key in {}.",
-                signer.service_account,
-                share::default_path().display()
-            );
-        }
-        Err(error) => {
-            println!(
-                "Could not set up dashboard share links: {error}\n\
-                 Sync itself is unaffected, and `ccusage sync dashboard` still works locally. \
-                 Re-running setup picks up where this left off; if the project refuses the \
-                 signer account, the message above names the permission it wants."
-            );
-        }
-    }
 }
 
 #[cfg(test)]

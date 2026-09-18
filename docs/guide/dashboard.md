@@ -26,30 +26,41 @@ This uploads the page (`index.html`, `app.js`, `styles.css`) plus the third-part
 
 Two buckets rather than a public prefix because GCS rejects an IAM condition on an `allUsers` binding (`Conditions are not allowed on public resources`), so a bucket is the only boundary it will enforce for a public grant. The dashboard bucket holds the page and published price data and nothing else.
 
-`--deploy` also mints a share link for you, so the published page shows data on first open rather than an explanation. Add `--open` to launch it.
+`--deploy` needs sharing to be enabled first (see below) and mints a share link for you, so the published page shows data on first open rather than an explanation. Add `--open` to launch it.
+
+## Enable sharing
+
+```bash
+ccusage sync share
+```
+
+Sharing is off until you ask for it. `ccusage sync setup` configures sync and nothing else; `ccusage sync dashboard --deploy` and `--share` refuse with an error pointing here until `sync share` has run, and hosting the dashboard locally never needs it.
+
+`ccusage sync share --disable` revokes it again: the key, the account it belongs to, and the local copy all go, while the bucket and everything synced into it are untouched. Links already handed out stop working.
 
 ## Share the data
 
 ```bash
-ccusage sync dashboard --share --share-ttl 3600
+ccusage sync dashboard --share             # 24h by default
+ccusage sync dashboard --share --ttl 30m   # also 12h, 2d — 7d is the maximum
 ```
 
 This mints time-boxed signed URLs for the four rollup objects and returns a link of the form `…/dashboard/index.html#s=<encoded urls>`. The URLs ride in the location fragment, which browsers do not send to servers and which therefore stays out of access logs, proxies, and `Referer` headers.
 
-It is still a bearer link: anyone holding it can read that data until it expires.
+It is still a bearer link: anyone holding it can read that data until it expires. `--ttl` belongs to `--share` and is refused without it; the link `--deploy` mints for you uses the 24-hour default.
 
 ### The signing key
 
-Signing a URL needs an HMAC credential, which application-default credentials cannot produce — so `ccusage sync setup` creates one for you. It creates (or adopts) a dedicated service account, `ccusage-dashboard@<project>.iam.gserviceaccount.com`, grants it `roles/storage.objectViewer` on the data bucket and nothing else, mints one HMAC key for it, and writes that key to `~/.local/state/ccusage/sync-signer.json` with mode `0600`. The key is never written to `ccusage.json`, which is shared and committed; nothing prints the secret.
+Signing a URL needs an HMAC credential, which application-default credentials cannot produce — so `ccusage sync share` creates one for you. It creates (or adopts) a dedicated service account, `ccusage-dashboard@<project>.iam.gserviceaccount.com`, grants it `roles/storage.objectViewer` on the data bucket and nothing else, mints one HMAC key for it, and writes that key to `~/.local/state/ccusage/sync-signer.json` with mode `0600`. The key is never written to `ccusage.json`, which is shared and committed; nothing prints the secret.
 
 Consequences worth knowing:
 
-- Reruns of setup are idempotent: an existing key is kept and the read binding re-asserted, so no second account or key accumulates.
-- A machine with no key mints one on the first `--share` or `--deploy`, so setups from before this existed heal themselves.
-- If the project forbids creating a service account, setup says so and carries on: sync works, the local dashboard works, and only share links are unavailable until the permission exists.
-- To revoke every link at once, delete the key: `gcloud storage hmac update --deactivate <accessId>` then `gcloud storage hmac delete <accessId>`, and remove `sync-signer.json`. The next setup mints a fresh one.
-- `ccusage sync remove` deletes the key, the service account, and the local file for you.
-- `CCUSAGE_SYNC_HMAC_ACCESS_ID` / `CCUSAGE_SYNC_HMAC_SECRET` still work and take second place to the setup-managed key, for anyone who prefers to manage the credential themselves.
+- Reruns of `sync share` are idempotent: an existing key is kept and the read binding re-asserted, so no second account or key accumulates. A bucket configured before this command existed can enable sharing at any time.
+- A brand-new account is not immediately visible to the APIs that must accept it, so it waits (up to three minutes, saying so) for the bucket grant and the key to go through. If it runs out of time, the account it made is kept and re-running `ccusage sync share` continues from there.
+- If the project forbids creating a service account, only share links are affected: sync and the local dashboard work regardless, which is why this is a separate command rather than part of setup.
+- To revoke every link at once, run `ccusage sync share --disable`.
+- `ccusage sync remove` deletes the key, the service account, and the local file along with the data.
+- `CCUSAGE_SYNC_HMAC_ACCESS_ID` / `CCUSAGE_SYNC_HMAC_SECRET` still work and take second place to the managed key, for anyone who prefers to manage the credential themselves.
 
 ## Access models at a glance
 
@@ -57,7 +68,7 @@ Consequences worth knowing:
 | --- | --- | --- | --- |
 | `ccusage sync dashboard` | loopback | loopback | you, on this machine |
 | `--deploy` | public | signed URLs | anyone with the printed link, until it expires |
-| `--deploy` without a signing key | public | private | nobody |
+| `--deploy` before `ccusage sync share` | not published | private | nobody — the command errors |
 
 ## What the page shows
 

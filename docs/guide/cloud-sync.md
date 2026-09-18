@@ -30,9 +30,10 @@ ccusage sync setup
 ```
 
 Setup authenticates, picks a project, creates a bucket if you do not already have
-one, provisions the read-only service account that signs
-[dashboard](/guide/dashboard#the-signing-key) share links, and writes the result
-to your [configuration file](/guide/config-files):
+one, and writes the result to your [configuration file](/guide/config-files).
+It sets up sync and nothing else — publishing a dashboard other people can open
+needs a signing key, which [`ccusage sync share`](/guide/dashboard#enable-sharing)
+creates when you ask for one:
 
 ```json
 {
@@ -344,10 +345,14 @@ actual contents disagree, or when a machine is retired.
 | `another 'ccusage sync' is already running` | wait, or delete the lock file named |
 | A retired machine still counts | `ccusage sync forget <machine-id>` |
 | One machine appears twice after a reinstall | `ccusage sync merge-machine <old> <new>` |
+| `share links are not enabled for this bucket` | `ccusage sync share` |
+| A link you handed out should stop working | `ccusage sync share --disable` |
 | You want the whole thing gone | `ccusage sync remove` |
 
 None of these except `forget`, `remove`, and `--prune` can delete usage, so
-`repair` is always safe to try first.
+`repair` is always safe to try first. Every `sync` command also takes `--json`
+for scripting and `--config <path>` to work against a configuration file other
+than the discovered one.
 
 ### Rebuilding from the data
 
@@ -421,6 +426,44 @@ says so and the bucket is yours to delete with
 `gcloud storage rm --recursive gs://<bucket>`. The signer goes last for the same
 reason, and a project that refuses its deletion prints the
 `gcloud iam service-accounts delete` command to finish by hand.
+
+### Sharing the dashboard
+
+```bash
+ccusage sync share            # enable share links for this bucket
+ccusage sync share --disable  # revoke them again
+```
+
+Sharing is off until you enable it, and setup does not enable it:
+`ccusage sync dashboard --deploy` and `--share` stop with an error until
+`ccusage sync share` has run. Enabling creates a read-only signer service
+account and keeps its key on this machine; disabling deletes both and
+invalidates every link minted from it, without touching a byte of usage data.
+[Dashboard](/guide/dashboard#enable-sharing) has the detail.
+
+## A worked example
+
+From nothing to a published dashboard, across two machines:
+
+```bash
+# Laptop
+ccusage sync setup                       # sign in, pick a project, name a bucket
+ccusage sync run                         # upload today and everything before it
+ccusage sync status --json               # what it resolved to
+
+# Desktop, into the same bucket
+ccusage sync setup --bucket ccusage-9f3a1c2b4405
+ccusage sync run
+
+# Either machine
+ccusage sync doctor                      # credentials, CAS, clock, exposure
+ccusage sync share                       # enable share links, once per bucket
+ccusage sync dashboard --deploy --open   # publish the page and open a live link
+ccusage compare                          # the same tokens at other providers
+```
+
+After that, `ccusage sync run` on a schedule is the whole routine, and
+`just update` in a checkout pulls, builds, and installs a newer binary.
 
 ## Privacy
 
