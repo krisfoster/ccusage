@@ -189,6 +189,9 @@ bunx ccusage monthly --compact  # Compact monthly report
 - 🌐 **Offline Mode**: Use pre-cached pricing data without network connectivity with `--offline`
 - 🧩 **Custom Pricing Overrides**: Override token pricing per raw model name in `ccusage.json` without rebuilding
 - 🏗️ **Claude Instance Support**: Group Claude Code usage by project with `--instances` and filter by specific projects
+- ☁️ **Cloud Sync**: Merge every machine's usage into one private bucket with `ccusage sync`
+- 📈 **Dashboard**: Render the bucket as a single page, locally or published, with `ccusage sync dashboard`
+- 🔀 **Provider Comparison**: Reprice the same tokens at other providers' list rates with `ccusage compare`
 - 🌍 **Timezone Support**: Configure timezone for date grouping with `--timezone` option
 - ⚙️ **Configuration Files**: Set defaults with JSON configuration files, complete with IDE autocomplete and validation
 
