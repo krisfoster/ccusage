@@ -108,6 +108,15 @@ bunx -p https://pkg.pr.new/ccusage/ccusage@<pr-number> ccusage --offline
 
 > [bunx](https://bun.com/docs/pm/bunx) caches the downloaded package, so repeated runs are faster after the first launch.
 
+### From a checkout
+
+```bash
+just update                    # pull main, build, install into ~/.cargo/bin
+just update branch=my-branch   # same, from another branch
+```
+
+The recipe stops rather than touching uncommitted work, and pulls `--ff-only`.
+
 ## Usage
 
 ```bash

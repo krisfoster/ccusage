@@ -39,6 +39,30 @@ install:
 # Build every workspace package
 build: ccusage::build docs::build
 
+# Pull, build and install the `ccusage` binary from this checkout
+update branch="main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `cargo install` does the release build itself, so there is no separate
+    # build step here to keep in sync. The pull is `--ff-only` and the tree has
+    # to be clean: silently merging or stashing work in progress is a worse
+    # outcome than stopping and saying so.
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "working tree has uncommitted changes; commit or stash them first" >&2
+        exit 1
+    fi
+    git fetch origin {{branch}}
+    git checkout {{branch}}
+    git merge --ff-only origin/{{branch}}
+    # The dev shell hands the build a pinned LiteLLM snapshot; outside it the
+    # build has no snapshot at all and fails, so ask the feature to download one.
+    features=()
+    if [ -z "${CCUSAGE_PRICING_JSON_PATH:-}" ]; then
+        features=(--features fetch-litellm-pricing)
+    fi
+    cargo install --path rust/crates/ccusage --locked --force "${features[@]}"
+    echo "Installed $(command -v ccusage): $(ccusage --version)"
+
 # Type-check and lint TypeScript with oxlint's type-aware checker
 typecheck:
     oxlint .
