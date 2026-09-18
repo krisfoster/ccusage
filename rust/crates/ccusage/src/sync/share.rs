@@ -14,6 +14,8 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 
 use ccusage_objectstore::HmacKey;
@@ -109,6 +111,33 @@ pub(crate) fn forget(path: &Path) -> bool {
     fs::remove_file(path).is_ok()
 }
 
+/// A service account exists in IAM before the services that must accept it as
+/// a principal know about it: for a few seconds after creation, `setIamPolicy`
+/// and the HMAC endpoint both answer "does not exist" for an account that
+/// plainly does. Waiting it out is the only remedy, and a setup that fails
+/// here leaves the user with an account they must then clean up by hand.
+const PROPAGATION_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(15),
+];
+
+fn awaiting_propagation<T>(
+    delays: &[Duration],
+    mut attempt: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    for delay in delays {
+        match attempt() {
+            Err(error) if error.contains("does not exist") => thread::sleep(*delay),
+            settled => return settled,
+        }
+    }
+    attempt()
+}
+
 /// What provisioning did, so setup can say it without the provisioning code
 /// printing anything itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,15 +166,27 @@ pub(crate) fn ensure(
             .map_err(|error| error.to_string())?;
         return Ok((existing, Provisioned::Existing));
     }
+    provision(admin, bucket_admin, bucket, path, &PROPAGATION_DELAYS)
+}
+
+fn provision(
+    admin: &SignerAdmin,
+    bucket_admin: &BucketAdmin,
+    bucket: &str,
+    path: &Path,
+    delays: &[Duration],
+) -> Result<(StoredSigner, Provisioned), String> {
     let email = admin
         .ensure_service_account()
         .map_err(|error| error.to_string())?;
-    bucket_admin
-        .grant_object_viewer(&format!("serviceAccount:{email}"))
-        .map_err(|error| error.to_string())?;
-    let key = admin
-        .create_hmac_key(&email)
-        .map_err(|error| error.to_string())?;
+    awaiting_propagation(delays, || {
+        bucket_admin
+            .grant_object_viewer(&format!("serviceAccount:{email}"))
+            .map_err(|error| error.to_string())
+    })?;
+    let key = awaiting_propagation(delays, || {
+        admin.create_hmac_key(&email).map_err(|e| e.to_string())
+    })?;
     let signer = StoredSigner {
         bucket: bucket.to_string(),
         service_account: email,
@@ -300,6 +341,84 @@ mod tests {
             "read-only, never write: {}",
             requests[3]
         );
+    }
+
+    /// The account is created and the very next call is told it does not
+    /// exist. Failing there abandons a real account in the project and tells
+    /// the user their project forbade creating one, which is the opposite of
+    /// what happened.
+    #[test]
+    fn an_account_that_has_not_propagated_yet_is_waited_for() {
+        let dir = assert_fs::TempDir::new().expect("temp dir");
+        let path = dir.path().join("sync-signer.json");
+        let fake = ScriptedServer::serving(vec![
+            json(404, r#"{"error":{"message":"not found"}}"#),
+            json(200, &format!(r#"{{"email":"{SIGNER_EMAIL}"}}"#)),
+            json(200, r#"{"etag":"tag","bindings":[]}"#),
+            json(
+                400,
+                &format!(
+                    r#"{{"error":{{"message":"Service account {SIGNER_EMAIL} does not exist."}}}}"#
+                ),
+            ),
+            json(200, r#"{"etag":"tag","bindings":[]}"#),
+            json(200, r#"{"etag":"tag2"}"#),
+            json(
+                400,
+                &format!(
+                    r#"{{"error":{{"message":"Service account {SIGNER_EMAIL} does not exist."}}}}"#
+                ),
+            ),
+            json(
+                200,
+                r#"{"secret":"c2VjcmV0","metadata":{"accessId":"GOOG1MINTED","state":"ACTIVE"}}"#,
+            ),
+        ]);
+        let (signer_admin, bucket_admin) = admins(&fake);
+
+        let (stored, provisioned) = provision(
+            &signer_admin,
+            &bucket_admin,
+            "ccusage-abc",
+            &path,
+            &[Duration::ZERO; 4],
+        )
+        .expect("provisioned");
+
+        assert_eq!(provisioned, Provisioned::Minted);
+        assert_eq!(stored.access_id, "GOOG1MINTED");
+    }
+
+    /// Waiting cannot be unbounded, and an account that is still missing after
+    /// the last wait is a real failure to report.
+    #[test]
+    fn an_account_that_never_appears_is_reported() {
+        let dir = assert_fs::TempDir::new().expect("temp dir");
+        let path = dir.path().join("sync-signer.json");
+        let missing = format!(
+            r#"{{"error":{{"message":"Service account {SIGNER_EMAIL} does not exist."}}}}"#
+        );
+        let fake = ScriptedServer::serving(vec![
+            json(404, r#"{"error":{"message":"not found"}}"#),
+            json(200, &format!(r#"{{"email":"{SIGNER_EMAIL}"}}"#)),
+            json(200, r#"{"etag":"tag","bindings":[]}"#),
+            json(400, &missing),
+            json(200, r#"{"etag":"tag","bindings":[]}"#),
+            json(400, &missing),
+        ]);
+        let (signer_admin, bucket_admin) = admins(&fake);
+
+        let error = provision(
+            &signer_admin,
+            &bucket_admin,
+            "ccusage-abc",
+            &path,
+            &[Duration::ZERO],
+        )
+        .expect_err("still missing");
+
+        assert!(error.contains("does not exist"), "{error}");
+        assert_eq!(load(&path, "ccusage-abc"), None);
     }
 
     /// Setup is run again after the first one worked. Minting a second key
