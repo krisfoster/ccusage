@@ -6,6 +6,12 @@
 //! the sync lock in this machine's state directory, owner-readable and never
 //! uploaded anywhere.
 //!
+//! Sharing is opt-in, and `ccusage sync share` is what opts in: minting the
+//! key creates a service account and a long-lived credential in the user's
+//! project, which is not a side effect `sync setup` should have on someone who
+//! only wanted their usage backed up. `--deploy` and `--share` refuse until it
+//! has been run, rather than quietly provisioning on first use.
+//!
 //! It is scoped to the bucket it was minted for. Pointing a machine at a
 //! different bucket has to mint a new key rather than sign links with a
 //! credential that has no access to the data they name, which would produce
@@ -14,14 +20,28 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
 
+use ccusage_config::ConfigContext;
 use ccusage_objectstore::HmacKey;
 use serde_json::{Value, json};
 
-use crate::gcs::{bucket::BucketAdmin, signer::SignerAdmin};
+use super::{STORAGE_ENDPOINT, status};
+use crate::{
+    cli::SyncShareArgs,
+    cli_error,
+    gcs::{Authorizer, JsonApi, RetryPolicy, bucket::BucketAdmin, signer::SignerAdmin},
+};
+
+/// What `--deploy` and `--share` say when sharing was never enabled. Naming
+/// the command is the whole point: the old behaviour provisioned silently, so
+/// a user never learned that a service account had appeared in their project.
+pub(crate) const NOT_ENABLED: &str = "share links are not enabled for this bucket. Run `ccusage sync share` to create the \
+     read-only service account that signs them, or host the dashboard locally with `ccusage \
+     sync dashboard`.";
 
 /// The signer this machine uses for `--share`, as stored on disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,7 +140,8 @@ pub(crate) fn forget(path: &Path) -> bool {
 /// The wait is bounded by wall clock rather than by a number of attempts, so
 /// how long it tolerates does not depend on how slow the calls themselves are,
 /// and giving up is not a dead end: the account and any binding already made
-/// are kept, and re-running setup resumes from whichever step still fails.
+/// are kept, and re-running the command resumes from whichever step still
+/// fails.
 /// Convergence over repeated runs is what makes this deterministic; a single
 /// long wait never could be.
 const PROPAGATION_BUDGET: Duration = Duration::from_secs(180);
@@ -148,7 +169,7 @@ fn awaiting_propagation<T>(
                 if remaining.is_zero() {
                     return Err(format!(
                         "{error} It was created, but is still not visible to the API that needs \
-                         it after {} seconds. Re-run `ccusage sync setup` to continue from here.",
+                         it after {} seconds. Re-run `ccusage sync share` to continue from here.",
                         budget.as_secs(),
                     ));
                 }
@@ -166,8 +187,8 @@ fn awaiting_propagation<T>(
     }
 }
 
-/// What provisioning did, so setup can say it without the provisioning code
-/// printing anything itself.
+/// What provisioning did, so the caller can say it without the provisioning
+/// code printing anything itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Provisioned {
     /// A usable key was already on this machine.
@@ -178,10 +199,10 @@ pub(crate) enum Provisioned {
 
 /// Makes sure this machine can sign share links for `bucket`.
 ///
-/// Idempotent in the way setup needs: an existing local key is kept, an
-/// existing service account is adopted, and the read binding is re-asserted
-/// (which is a no-op once it is there) so a bucket recreated without it heals
-/// on the next setup.
+/// Idempotent in the way an enable command needs: an existing local key is
+/// kept, an existing service account is adopted, and the read binding is
+/// re-asserted (which is a no-op once it is there) so a bucket recreated
+/// without it heals on the next run.
 pub(crate) fn ensure(
     admin: &SignerAdmin,
     bucket_admin: &BucketAdmin,
@@ -234,6 +255,96 @@ fn provision(
     };
     save(path, &signer)?;
     Ok((signer, Provisioned::Minted))
+}
+
+/// `ccusage sync share`: turn share links on, or off again.
+pub(crate) fn execute(config: &ConfigContext, args: &SyncShareArgs) -> crate::Result<()> {
+    let status = status::Status::from_config(config.sync());
+    let Some(bucket) = status.bucket.clone() else {
+        return Err(cli_error(
+            "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
+        ));
+    };
+    let Some(project) = status.project_id.clone() else {
+        return Err(cli_error(
+            "sync has no project recorded. Re-run 'ccusage sync setup'.".to_string(),
+        ));
+    };
+    let credentials = Arc::new(
+        super::auth::resolve(
+            super::config_auth_mode(config),
+            args.disable,
+            &mut super::auth::TerminalPrompt,
+        )
+        .map_err(|error| cli_error(error.to_string()))?,
+    );
+    let signer_admin = SignerAdmin::new(&project, Arc::clone(&credentials) as Arc<dyn Authorizer>);
+    let path = default_path();
+
+    if args.disable {
+        return disable(&signer_admin, &path, &project);
+    }
+
+    let bucket_admin = BucketAdmin::new(
+        JsonApi::new(
+            STORAGE_ENDPOINT,
+            Box::new(Arc::clone(&credentials)),
+            RetryPolicy::default(),
+        ),
+        &bucket,
+    );
+    match ensure(&signer_admin, &bucket_admin, &bucket, &path, &|line| {
+        println!("{line}");
+    })
+    .map_err(cli_error)?
+    {
+        (signer, Provisioned::Existing) => {
+            println!(
+                "Share links are already enabled, signed by {}.",
+                signer.service_account
+            );
+        }
+        (signer, Provisioned::Minted) => {
+            println!(
+                "Share links are enabled. Created {} with read-only access to gs://{bucket}, and \
+                 stored its key in {}.",
+                signer.service_account,
+                path.display()
+            );
+        }
+    }
+    println!("`ccusage sync dashboard --deploy --open` now publishes a page that can read it.");
+    Ok(())
+}
+
+/// Revokes every key the signer holds and deletes the account, so disabling is
+/// not merely local: a key left alive in the project still reads the data, and
+/// a second machine's copy of it would keep working.
+fn disable(admin: &SignerAdmin, path: &Path, project: &str) -> crate::Result<()> {
+    let email = admin.service_account_email();
+    let deleted = admin
+        .hmac_access_ids(&email)
+        .and_then(|access_ids| {
+            for access_id in access_ids {
+                admin.delete_hmac_key(&access_id)?;
+            }
+            admin.delete_service_account(&email)
+        })
+        .map_err(|error| {
+            cli_error(format!(
+                "could not disable share links: {error}. Remove the account by hand with `gcloud \
+                 iam service-accounts delete {email} --project {project}`."
+            ))
+        })?;
+    let forgotten = forget(path);
+    match (deleted, forgotten) {
+        (false, false) => println!("Share links were not enabled; nothing to disable."),
+        _ => println!(
+            "Share links are disabled. Deleted {email} and its keys, so links already handed out \
+             stop working."
+        ),
+    }
+    Ok(())
 }
 
 fn string_at(value: &Value, key: &str) -> Option<String> {
@@ -345,7 +456,7 @@ mod tests {
 
     const SIGNER_EMAIL: &str = "ccusage-dashboard@my-project.iam.gserviceaccount.com";
 
-    /// The whole point of the redesign: one `sync setup` leaves the machine
+    /// The whole point of the redesign: one `sync share` leaves the machine
     /// able to sign, with no key for the user to create or paste.
     #[test]
     fn a_first_setup_creates_the_account_grants_it_read_and_keeps_the_key() {
@@ -466,12 +577,12 @@ mod tests {
         .expect_err("still missing");
 
         assert!(error.contains("does not exist"), "{error}");
-        assert!(error.contains("Re-run `ccusage sync setup`"), "{error}");
+        assert!(error.contains("Re-run `ccusage sync share`"), "{error}");
         assert_eq!(load(&path, "ccusage-abc"), None);
     }
 
-    /// Setup is run again after the first one worked. Minting a second key
-    /// every time would pile up credentials that no cleanup knows about.
+    /// Enabling again after the first time worked. Minting a second key every
+    /// time would pile up credentials that no cleanup knows about.
     #[test]
     fn a_rerun_keeps_the_existing_key_and_mints_nothing() {
         let dir = assert_fs::TempDir::new().expect("temp dir");
@@ -513,6 +624,45 @@ mod tests {
             .expect_err("refused");
 
         assert!(error.contains("permission denied"), "{error}");
+        assert_eq!(load(&path, "ccusage-abc"), None);
+    }
+
+    /// Disabling has to reach the project, not just this disk: a key left
+    /// alive still reads the data, and any link already handed out keeps
+    /// working until the key it was signed with is gone.
+    #[test]
+    fn disabling_deletes_the_key_and_the_account_as_well_as_the_local_copy() {
+        let dir = assert_fs::TempDir::new().expect("temp dir");
+        let path = dir.path().join("sync-signer.json");
+        save(&path, &signer("ccusage-abc")).expect("saved");
+        let mut fake = ScriptedServer::serving(vec![
+            json(200, r#"{"items":[{"accessId":"GOOG1EXAMPLE"}]}"#),
+            json(200, r#"{"accessId":"GOOG1EXAMPLE","state":"INACTIVE"}"#),
+            json(204, ""),
+            json(200, "{}"),
+        ]);
+        let (signer_admin, _) = admins(&fake);
+
+        disable(&signer_admin, &path, "my-project").expect("disabled");
+
+        assert_eq!(load(&path, "ccusage-abc"), None);
+        assert_eq!(fake.requests().len(), 4);
+    }
+
+    /// Disabling twice, or disabling something that was never enabled, is a
+    /// no-op rather than an error: the end state asked for is already true.
+    #[test]
+    fn disabling_again_is_not_an_error() {
+        let dir = assert_fs::TempDir::new().expect("temp dir");
+        let path = dir.path().join("sync-signer.json");
+        let fake = ScriptedServer::serving(vec![
+            json(200, r#"{"items":[]}"#),
+            json(404, r#"{"error":{"message":"not found"}}"#),
+        ]);
+        let (signer_admin, _) = admins(&fake);
+
+        disable(&signer_admin, &path, "my-project").expect("nothing to do");
+
         assert_eq!(load(&path, "ccusage-abc"), None);
     }
 

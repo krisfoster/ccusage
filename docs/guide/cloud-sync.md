@@ -30,9 +30,10 @@ ccusage sync setup
 ```
 
 Setup authenticates, picks a project, creates a bucket if you do not already have
-one, provisions the read-only service account that signs
-[dashboard](/guide/dashboard#the-signing-key) share links, and writes the result
-to your [configuration file](/guide/config-files):
+one, and writes the result to your [configuration file](/guide/config-files).
+It sets up sync and nothing else — publishing a dashboard other people can open
+needs a signing key, which [`ccusage sync share`](/guide/dashboard#enable-sharing)
+creates when you ask for one:
 
 ```json
 {

@@ -18,6 +18,7 @@
 		"sync_forget_combined_options": ["sync_forget_options", "sync_options"],
 		"sync_remove_combined_options": ["sync_remove_options", "sync_options"],
 		"sync_run_combined_options": ["sync_run_options", "sync_options"],
+		"sync_share_combined_options": ["sync_share_options", "sync_options"],
 		"sync_setup_combined_options": ["sync_setup_options", "sync_options"]
 	},
 	"root": {
@@ -916,6 +917,10 @@
 					"description": "Delete everything ccusage uploaded, and the buckets"
 				},
 				{
+					"name": "share",
+					"description": "Enable share links for the dashboard, or disable them"
+				},
+				{
 					"name": "dashboard",
 					"description": "Deploy the dashboard or mint a shareable link"
 				}
@@ -968,6 +973,12 @@
 			"description": "Delete everything ccusage uploaded, the buckets it created, and the local sync settings.",
 			"usage": "ccusage sync remove <OPTIONS>",
 			"options": "sync_remove_combined_options"
+		},
+		{
+			"path": ["sync", "share"],
+			"description": "Enable share links for the dashboard, or disable them.",
+			"usage": "ccusage sync share <OPTIONS>",
+			"options": "sync_share_combined_options"
 		},
 		{
 			"path": ["sync", "dashboard"],

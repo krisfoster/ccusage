@@ -8,7 +8,7 @@ use ccusage_cli::{
     OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder,
     StatuslineArgs, SyncArgs, SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs,
     SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs, SyncRunArgs, SyncSetupArgs,
-    VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
+    SyncShareArgs, VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -522,6 +522,17 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
                 Ok(true)
             })?;
             SyncCommand::Remove(args)
+        }
+        "share" => {
+            let mut args = SyncShareArgs::default();
+            parse_sync_options(parser, "share", &mut json, &mut config_path, |flag, _| {
+                match flag {
+                    "--disable" => args.disable = true,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            SyncCommand::Share(args)
         }
         "dashboard" => {
             let mut args = SyncDashboardArgs::default();
