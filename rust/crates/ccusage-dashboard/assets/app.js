@@ -619,6 +619,54 @@ function render() {
 	void models;
 }
 
+const THEME_KEY = 'ccusage.theme';
+const THEMES = ['system', 'light', 'dark'];
+
+/**
+ * Applies a theme by attribute, or removes it to follow the operating system.
+ *
+ * The stylesheet, not this function, knows what each theme looks like: light
+ * lives under `:root[data-theme='light']` and system under no attribute at all,
+ * so following the OS needs no media query listener here.
+ */
+function applyTheme(theme) {
+	if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+	else document.documentElement.setAttribute('data-theme', theme);
+}
+
+/**
+ * Storage is unavailable in a private window and in a sandboxed frame, where
+ * touching it throws. A dashboard that will not load because it could not
+ * remember a colour would be a poor trade, so both ends are guarded.
+ */
+function storedTheme() {
+	try {
+		const stored = localStorage.getItem(THEME_KEY);
+		return THEMES.includes(stored) ? stored : 'system';
+	} catch {
+		return 'system';
+	}
+}
+
+function rememberTheme(theme) {
+	try {
+		localStorage.setItem(THEME_KEY, theme);
+	} catch {
+		// Not remembering it is the whole cost.
+	}
+}
+
+function themes() {
+	const select = document.getElementById('theme');
+	const theme = storedTheme();
+	applyTheme(theme);
+	select.value = theme;
+	select.addEventListener('change', () => {
+		applyTheme(select.value);
+		rememberTheme(select.value);
+	});
+}
+
 function timezones() {
 	const supported =
 		typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
@@ -633,6 +681,7 @@ function timezones() {
 }
 
 async function main() {
+	themes();
 	timezones();
 	// The redraw changes the box being observed, which inside the callback is
 	// what raises "ResizeObserver loop completed with undelivered
