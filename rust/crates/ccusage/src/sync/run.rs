@@ -223,7 +223,8 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
 
     // Before anything is folded: a clock hours out files usage under the
     // wrong dates, and no later step can tell that it did.
-    failures::check_clock(bucket_time_ms(&store, &keys), now_ms()).map_err(cli_error)?;
+    failures::check_clock(server_time_ms(&store, &keys, &machine_id), now_ms())
+        .map_err(cli_error)?;
 
     let shared = SharedArgs::with_defaults();
     let pricing =
@@ -321,16 +322,24 @@ fn skipped(loaded: &sources::Sources) -> Vec<String> {
         .collect()
 }
 
-/// When the bucket's own clock last touched the manifest, as the reference
-/// for this machine's clock. A bucket nobody has written yet has nothing to
-/// compare against, and neither does a store that reports no times.
-fn bucket_time_ms(store: &dyn ObjectStore, keys: &KeySpace) -> Option<i64> {
-    let key = keys.manifest();
-    store
-        .get(&key)
-        .ok()
-        .flatten()
-        .and_then(|(_, meta)| meta.updated_ms)
+/// The bucket's clock right now, read by writing a probe object and taking the
+/// time the store stamped on it.
+///
+/// It has to be a fresh write. An existing object's timestamp says when that
+/// object was last written, so the manifest — written once, at setup — would
+/// make every sync on a bucket older than the skew threshold look like a
+/// machine whose clock is days fast.
+///
+/// A store that refuses the probe or reports no times leaves the clock
+/// unchecked rather than stopping the sync: the checks that follow will fail
+/// on their own if the bucket is genuinely unwritable.
+fn server_time_ms(store: &dyn ObjectStore, keys: &KeySpace, machine_id: &str) -> Option<i64> {
+    let key = keys.probe(machine_id).ok()?;
+    let meta = store
+        .put(&key, b"{}", "application/json", &Precondition::None)
+        .ok()?;
+    let _ = store.delete(&key, &Precondition::None);
+    meta.updated_ms
 }
 
 /// Without the bucket's salt this machine's hashes would not intersect anyone
@@ -688,6 +697,47 @@ mod tests {
         let text = summary.to_text(false);
         assert!(text.contains("Warning"), "{text}");
         assert!(text.contains("2026-09-10"), "{text}");
+    }
+
+    /// The bucket's clock has to be read from a write made now. Taking it from
+    /// the manifest, which is written once at setup, made every sync on a
+    /// bucket older than an hour refuse as though the machine were days fast.
+    #[test]
+    fn the_clock_check_reads_the_bucket_now_rather_than_when_it_was_set_up() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let manifest = store.seed(&keys.manifest(), b"{\"schema\":1}");
+        store.advance_clock_ms(7 * 24 * 60 * 60 * 1000);
+
+        let server_ms = server_time_ms(&store, &keys, MACHINE).expect("probe time");
+
+        assert!(
+            server_ms > manifest.updated_ms.expect("seeded time") + 6 * 24 * 60 * 60 * 1000,
+            "{server_ms} should be the bucket's clock now, not the manifest's"
+        );
+        assert!(failures::check_clock(Some(server_ms), store.now_ms()).is_ok());
+    }
+
+    #[test]
+    fn the_clock_probe_leaves_nothing_behind() {
+        let store = MemoryStore::new();
+        let keys = keys();
+
+        server_time_ms(&store, &keys, MACHINE).expect("probe time");
+
+        assert!(!store.contains(&keys.probe(MACHINE).expect("key")));
+    }
+
+    /// The probe is a diagnostic, not a gate: a store that will not take it
+    /// fails the writes that matter soon enough, with a better message.
+    #[test]
+    fn a_store_that_refuses_the_clock_probe_does_not_stop_the_sync() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        store.fail_next(Fault::Network);
+
+        assert_eq!(server_time_ms(&store, &keys, MACHINE), None);
+        assert!(failures::check_clock(None, NOW_MS).is_ok());
     }
 
     #[test]

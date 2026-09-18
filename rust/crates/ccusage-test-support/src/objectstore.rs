@@ -92,6 +92,12 @@ impl MemoryStore {
         self.state.lock().unwrap().clock_ms
     }
 
+    /// Move the store's clock forward, for tests about how old an object is
+    /// rather than how many writes ago it was written.
+    pub fn advance_clock_ms(&self, delta: i64) {
+        self.state.lock().unwrap().clock_ms += delta;
+    }
+
     pub fn contains(&self, key: &Key) -> bool {
         self.state.lock().unwrap().objects.contains_key(key.path())
     }
