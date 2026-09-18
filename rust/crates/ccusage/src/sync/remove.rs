@@ -1,9 +1,9 @@
 //! `ccusage sync remove`: the undo for everything the other sync commands did.
 //!
-//! Three things were created by syncing and all three are removed here: the
+//! Four things were created by syncing and all four are removed here: the
 //! objects under the key prefix, the two buckets (the private data bucket and
-//! the public `-dashboard` one), and the `sync` block in `ccusage.json` that
-//! points at them.
+//! the public `-dashboard` one), the service account and HMAC key that signed
+//! share links, and the `sync` block in `ccusage.json` that points at them.
 //!
 //! Two rules make this safe to run:
 //!
@@ -24,12 +24,12 @@ use std::sync::Arc;
 use ccusage_config::{ConfigContext, clear_sync, sync_writeback_path};
 use ccusage_objectstore::{KeySpace, ObjectStore, ObjectStoreError, Precondition};
 
-use super::{STORAGE_ENDPOINT, dashboard, lock, now_ms, status};
+use super::{STORAGE_ENDPOINT, dashboard, lock, now_ms, share, status};
 use crate::{
     cli::SyncRemoveArgs,
     cli_error,
     credentials::Credentials,
-    gcs::{GcsStore, JsonApi, RetryPolicy, bucket::BucketAdmin},
+    gcs::{Authorizer, GcsStore, JsonApi, RetryPolicy, bucket::BucketAdmin, signer::SignerAdmin},
 };
 
 type Result<T> = std::result::Result<T, String>;
@@ -185,8 +185,43 @@ pub(crate) fn execute(
         }
     }
 
+    remove_signer(&bucket, status.project_id.as_deref(), &credentials);
     forget_local_settings(config_path);
     Ok(())
+}
+
+/// Removes the service account setup created for share links, its keys, and
+/// this machine's copy of the secret.
+///
+/// Best effort, and last: the data is already gone, so a project that refuses
+/// the deletion leaves behind an account whose read access now points at
+/// nothing. Every key is deleted, not just the one this machine holds — a
+/// second machine's key would otherwise keep the account undeletable, and the
+/// message says where to finish by hand.
+fn remove_signer(bucket: &str, project: Option<&str>, credentials: &Arc<Credentials>) {
+    if share::forget(&share::default_path()) {
+        println!("Removed this machine's dashboard signing key.");
+    }
+    let Some(project) = project else {
+        return;
+    };
+    let admin = SignerAdmin::new(project, Arc::clone(credentials) as Arc<dyn Authorizer>);
+    let email = admin.service_account_email();
+    let outcome = admin.hmac_access_ids(&email).and_then(|access_ids| {
+        for access_id in access_ids {
+            admin.delete_hmac_key(&access_id)?;
+        }
+        admin.delete_service_account(&email)
+    });
+    match outcome {
+        Ok(true) => println!("Deleted the dashboard signer {email}."),
+        Ok(false) => {}
+        Err(error) => println!(
+            "The data in gs://{bucket} is gone, but the dashboard signer {email} could not be \
+             deleted: {error}. Remove it with `gcloud iam service-accounts delete {email} \
+             --project {project}`."
+        ),
+    }
 }
 
 /// Deletes one bucket, tolerating one that was never created.
@@ -255,6 +290,7 @@ fn warn(
     if delete_buckets {
         println!("{verb} the buckets themselves: gs://{bucket} and gs://{assets_bucket}.");
     }
+    println!("{verb} the service account that signed dashboard share links, and its keys.");
     println!(
         "This is every machine's uploaded usage, not just this one's, and it cannot be undone. \
          Your local logs are untouched."

@@ -785,6 +785,33 @@ The boundary is therefore the thing GCS actually enforces (the bucket), checked 
 bucket the upload goes to, and by the key space, where `dashboard_asset` remains the only
 constructor yielding a public key.
 
+### DR-13 — Setup provisions the signer, because a manual key is a broken feature
+
+DR-12 left the published page readable only through a signed URL, and the only signer the code had
+was an HMAC key the user created and exported themselves. Application-default credentials — what
+`sync setup` arranges, and therefore what nearly everyone has — cannot sign a URL locally, so
+`--deploy` published a page that was guaranteed to show nothing and `--share` failed with a message
+telling the user to go and run `gcloud storage hmac create`. A feature whose happy path ends in a
+manual credential step is not a feature.
+
+The `signBlob` alternative settled above needs the caller to hold
+`roles/iam.serviceAccountTokenCreator` on a signing account, which is a grant setup cannot always
+make; it was offered and not chosen.
+
+**Decision.** `sync setup` provisions the signer itself: it creates or adopts
+`ccusage-dashboard@<project>.iam.gserviceaccount.com`, grants it `roles/storage.objectViewer` on
+the data bucket only, mints exactly one HMAC key, and stores it in this machine's state directory
+(`sync-signer.json`, mode `0600`) — not in `ccusage.json`, which is shared and whose loader rejects
+secret-looking keys outright. `--share` and `--deploy` read that key, and a machine without one
+mints it on first use, so setups predating this heal themselves. Provisioning is the last step of
+setup and non-fatal: a project that forbids service-account creation still gets sync and the local
+dashboard, and is told which permission is missing. `sync remove` deletes the keys, the account,
+and the local file.
+
+The credential at rest is the cost of the choice: a long-lived key that can read the usage data.
+It is scoped to one bucket, read-only, owner-only on disk, never printed, and deletable in one
+command — which is a better trade than a feature nobody can use.
+
 ## 10. Threat model (P6-04)
 
 What an attacker has to hold, what holding it gets them, and what the code does about it. Each row
@@ -800,6 +827,7 @@ paragraph nobody re-read.
 | Per-bucket salt | `manifest.json`, and the local `ccusage.json` | with bucket read access, turns project hashes back into a guessable set |
 | Dedupe keys (`rollup/keys.json`) | data bucket | provider message/request IDs, salted |
 | Credentials (ADC token, HMAC key) | the OS credential locations, never the config file | full control of the bucket |
+| Dashboard signing key | `sync-signer.json` in the state directory, mode `0600` | read of the usage data, and the power to mint links to it |
 | Object *names* | the data bucket's listing | machine IDs, which agents are installed, and an exact day-by-day activity calendar |
 
 ### 10.2 Boundaries and what enforces them
@@ -843,7 +871,8 @@ of bucket access logs. The link is a bearer token and the CLI says so when it pr
   the HMAC key it was signed with, which invalidates every link signed by that key; the dashboard
   guide says this where a user minting a link will read it.
 - **Rotation:** minting from a dedicated service account's HMAC key keeps that blast radius off the
-  user's own credentials.
+  user's own credentials. Setup creates that account and key (DR-13), so the dedicated-account
+  property holds by default rather than by the user's diligence.
 
 ### 10.4 Accepted risks
 

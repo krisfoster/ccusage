@@ -23,6 +23,7 @@ use ccusage_objectstore::{Key, ObjectMeta, ObjectStore, ObjectStoreError, Precon
 
 pub(crate) mod bucket;
 pub(crate) mod projects;
+pub(crate) mod signer;
 
 const DEFAULT_ENDPOINT: &str = "https://storage.googleapis.com";
 const REQUEST_TIMEOUT_SECONDS: u64 = 30;
