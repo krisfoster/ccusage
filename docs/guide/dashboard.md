@@ -41,12 +41,13 @@ Sharing is off until you ask for it. `ccusage sync setup` configures sync and no
 ## Share the data
 
 ```bash
-ccusage sync dashboard --share --share-ttl 3600
+ccusage sync dashboard --share             # 24h by default
+ccusage sync dashboard --share --ttl 30m   # also 12h, 2d — 7d is the maximum
 ```
 
 This mints time-boxed signed URLs for the four rollup objects and returns a link of the form `…/dashboard/index.html#s=<encoded urls>`. The URLs ride in the location fragment, which browsers do not send to servers and which therefore stays out of access logs, proxies, and `Referer` headers.
 
-It is still a bearer link: anyone holding it can read that data until it expires.
+It is still a bearer link: anyone holding it can read that data until it expires. `--ttl` belongs to `--share` and is refused without it; the link `--deploy` mints for you uses the 24-hour default.
 
 ### The signing key
 
