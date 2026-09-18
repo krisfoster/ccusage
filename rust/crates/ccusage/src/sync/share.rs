@@ -15,7 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ccusage_objectstore::HmacKey;
@@ -112,30 +112,58 @@ pub(crate) fn forget(path: &Path) -> bool {
 }
 
 /// A service account exists in IAM before the services that must accept it as
-/// a principal know about it: for a few seconds after creation, `setIamPolicy`
-/// and the HMAC endpoint both answer "does not exist" for an account that
-/// plainly does. Waiting it out is the only remedy, and a setup that fails
-/// here leaves the user with an account they must then clean up by hand.
-const PROPAGATION_DELAYS: [Duration; 6] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-    Duration::from_secs(15),
-    Duration::from_secs(15),
-];
+/// a principal know about it: for a while after creation, `setIamPolicy` and
+/// the HMAC endpoint both answer "does not exist" for an account that plainly
+/// does. Google publishes no readiness signal for this, so the only honest
+/// test is the call itself, repeated.
+///
+/// The wait is bounded by wall clock rather than by a number of attempts, so
+/// how long it tolerates does not depend on how slow the calls themselves are,
+/// and giving up is not a dead end: the account and any binding already made
+/// are kept, and re-running setup resumes from whichever step still fails.
+/// Convergence over repeated runs is what makes this deterministic; a single
+/// long wait never could be.
+const PROPAGATION_BUDGET: Duration = Duration::from_secs(180);
+const PROPAGATION_POLL: Duration = Duration::from_secs(3);
+
+/// A principal that IAM does not know about yet. Everything else — a denied
+/// permission, a disabled API, a transport failure — is reported immediately
+/// rather than waited out, because waiting cannot change it.
+fn is_unpropagated(error: &str) -> bool {
+    error.contains("does not exist")
+}
 
 fn awaiting_propagation<T>(
-    delays: &[Duration],
+    budget: Duration,
+    poll: Duration,
+    progress: &dyn Fn(&str),
     mut attempt: impl FnMut() -> Result<T, String>,
 ) -> Result<T, String> {
-    for delay in delays {
+    let deadline = Instant::now() + budget;
+    let mut announced = false;
+    loop {
         match attempt() {
-            Err(error) if error.contains("does not exist") => thread::sleep(*delay),
+            Err(error) if is_unpropagated(&error) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(format!(
+                        "{error} It was created, but is still not visible to the API that needs \
+                         it after {} seconds. Re-run `ccusage sync setup` to continue from here.",
+                        budget.as_secs(),
+                    ));
+                }
+                if !announced {
+                    announced = true;
+                    progress(
+                        "Waiting for the dashboard service account to become usable (this takes \
+                         up to a couple of minutes on a new project).",
+                    );
+                }
+                thread::sleep(poll.min(remaining));
+            }
             settled => return settled,
         }
     }
-    attempt()
 }
 
 /// What provisioning did, so setup can say it without the provisioning code
@@ -159,6 +187,7 @@ pub(crate) fn ensure(
     bucket_admin: &BucketAdmin,
     bucket: &str,
     path: &Path,
+    progress: &dyn Fn(&str),
 ) -> Result<(StoredSigner, Provisioned), String> {
     if let Some(existing) = load(path, bucket) {
         bucket_admin
@@ -166,7 +195,15 @@ pub(crate) fn ensure(
             .map_err(|error| error.to_string())?;
         return Ok((existing, Provisioned::Existing));
     }
-    provision(admin, bucket_admin, bucket, path, &PROPAGATION_DELAYS)
+    provision(
+        admin,
+        bucket_admin,
+        bucket,
+        path,
+        PROPAGATION_BUDGET,
+        PROPAGATION_POLL,
+        progress,
+    )
 }
 
 fn provision(
@@ -174,17 +211,19 @@ fn provision(
     bucket_admin: &BucketAdmin,
     bucket: &str,
     path: &Path,
-    delays: &[Duration],
+    budget: Duration,
+    poll: Duration,
+    progress: &dyn Fn(&str),
 ) -> Result<(StoredSigner, Provisioned), String> {
     let email = admin
         .ensure_service_account()
         .map_err(|error| error.to_string())?;
-    awaiting_propagation(delays, || {
+    awaiting_propagation(budget, poll, progress, || {
         bucket_admin
             .grant_object_viewer(&format!("serviceAccount:{email}"))
             .map_err(|error| error.to_string())
     })?;
-    let key = awaiting_propagation(delays, || {
+    let key = awaiting_propagation(budget, poll, progress, || {
         admin.create_hmac_key(&email).map_err(|e| e.to_string())
     })?;
     let signer = StoredSigner {
@@ -325,7 +364,8 @@ mod tests {
         let (signer_admin, bucket_admin) = admins(&fake);
 
         let (stored, provisioned) =
-            ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path).expect("provisioned");
+            ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path, &|_| {})
+                .expect("provisioned");
 
         assert_eq!(provisioned, Provisioned::Minted);
         assert_eq!(stored.access_id, "GOOG1MINTED");
@@ -375,22 +415,28 @@ mod tests {
             ),
         ]);
         let (signer_admin, bucket_admin) = admins(&fake);
+        let announcements = std::cell::Cell::new(0);
 
         let (stored, provisioned) = provision(
             &signer_admin,
             &bucket_admin,
             "ccusage-abc",
             &path,
-            &[Duration::ZERO; 4],
+            Duration::from_secs(60),
+            Duration::ZERO,
+            &|_| announcements.set(announcements.get() + 1),
         )
         .expect("provisioned");
 
         assert_eq!(provisioned, Provisioned::Minted);
         assert_eq!(stored.access_id, "GOOG1MINTED");
+        // A silent multi-minute pause reads as a hang.
+        assert!(announcements.get() > 0);
     }
 
-    /// Waiting cannot be unbounded, and an account that is still missing after
-    /// the last wait is a real failure to report.
+    /// Waiting is bounded, and running out of budget has to say that the
+    /// account was made and that re-running continues from here — otherwise
+    /// the user is told to fix a permission that was never the problem.
     #[test]
     fn an_account_that_never_appears_is_reported() {
         let dir = assert_fs::TempDir::new().expect("temp dir");
@@ -413,11 +459,14 @@ mod tests {
             &bucket_admin,
             "ccusage-abc",
             &path,
-            &[Duration::ZERO],
+            Duration::ZERO,
+            Duration::ZERO,
+            &|_| {},
         )
         .expect_err("still missing");
 
         assert!(error.contains("does not exist"), "{error}");
+        assert!(error.contains("Re-run `ccusage sync setup`"), "{error}");
         assert_eq!(load(&path, "ccusage-abc"), None);
     }
 
@@ -436,7 +485,8 @@ mod tests {
         let (signer_admin, bucket_admin) = admins(&fake);
 
         let (stored, provisioned) =
-            ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path).expect("provisioned");
+            ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path, &|_| {})
+                .expect("provisioned");
 
         assert_eq!(provisioned, Provisioned::Existing);
         assert_eq!(stored, signer("ccusage-abc"));
@@ -459,8 +509,8 @@ mod tests {
         ]);
         let (signer_admin, bucket_admin) = admins(&fake);
 
-        let error =
-            ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path).expect_err("refused");
+        let error = ensure(&signer_admin, &bucket_admin, "ccusage-abc", &path, &|_| {})
+            .expect_err("refused");
 
         assert!(error.contains("permission denied"), "{error}");
         assert_eq!(load(&path, "ccusage-abc"), None);

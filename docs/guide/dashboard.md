@@ -46,6 +46,7 @@ Consequences worth knowing:
 
 - Reruns of setup are idempotent: an existing key is kept and the read binding re-asserted, so no second account or key accumulates.
 - A machine with no key mints one on the first `--share` or `--deploy`, so setups from before this existed heal themselves.
+- A brand-new account is not immediately visible to the APIs that must accept it, so setup waits (up to three minutes, saying so) for the bucket grant and the key to go through. If it runs out of time, the account it made is kept and re-running setup continues from there.
 - If the project forbids creating a service account, setup says so and carries on: sync works, the local dashboard works, and only share links are unavailable until the permission exists.
 - To revoke every link at once, delete the key: `gcloud storage hmac update --deactivate <accessId>` then `gcloud storage hmac delete <accessId>`, and remove `sync-signer.json`. The next setup mints a fresh one.
 - `ccusage sync remove` deletes the key, the service account, and the local file for you.

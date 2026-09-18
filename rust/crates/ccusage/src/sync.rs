@@ -368,7 +368,15 @@ fn provision_signer(
     credentials: Arc<impl Authorizer + 'static>,
 ) {
     let signer_admin = SignerAdmin::new(project_id, credentials as Arc<dyn Authorizer>);
-    match share::ensure(&signer_admin, admin, bucket, &share::default_path()) {
+    match share::ensure(
+        &signer_admin,
+        admin,
+        bucket,
+        &share::default_path(),
+        &|line| {
+            println!("{line}");
+        },
+    ) {
         Ok((signer, share::Provisioned::Existing)) => {
             println!(
                 "Dashboard share links are signed by {}.",

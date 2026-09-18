@@ -200,7 +200,9 @@ fn signing_key(
         bucket,
     );
     let signer_admin = SignerAdmin::new(project, Arc::clone(credentials) as Arc<dyn Authorizer>);
-    match share::ensure(&signer_admin, &admin, bucket, &path) {
+    match share::ensure(&signer_admin, &admin, bucket, &path, &|line| {
+        println!("{line}");
+    }) {
         Ok((signer, _)) => {
             println!(
                 "Share links are signed by {}, created for this bucket.",
