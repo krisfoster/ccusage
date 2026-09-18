@@ -18,6 +18,7 @@ mod merge_matrix;
 #[cfg(test)]
 mod merge_property;
 pub(crate) mod project;
+pub(crate) mod remove;
 pub(crate) mod rollups;
 pub(crate) mod run;
 pub(crate) mod sources;
@@ -68,6 +69,9 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
         SyncCommand::Repair(repair) => maintenance::execute_repair(&config, &repair),
         SyncCommand::Forget(forget) => maintenance::execute_forget(&config, &forget),
         SyncCommand::MergeMachine(merge) => maintenance::execute_merge(&config, &merge),
+        SyncCommand::Remove(remove_args) => {
+            remove::execute(&config, &remove_args, args.config.as_deref())
+        }
         SyncCommand::Dashboard(dashboard_args) => dashboard::execute(&config, &dashboard_args),
     }
 }

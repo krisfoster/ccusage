@@ -1903,6 +1903,30 @@ fn sync_merge_machine_requires_both_machines() {
 }
 
 #[test]
+fn sync_remove_deletes_nothing_extra_unless_asked() {
+    assert_eq!(
+        sync_args(&["ccusage", "sync", "remove"]).command,
+        SyncCommand::Remove(SyncRemoveArgs::default())
+    );
+    assert_eq!(
+        sync_args(&["ccusage", "sync", "remove", "--force", "--keep-bucket"]).command,
+        SyncCommand::Remove(SyncRemoveArgs {
+            force: true,
+            dry_run: false,
+            keep_bucket: true,
+        })
+    );
+    assert_eq!(
+        sync_args(&["ccusage", "sync", "remove", "-f", "--dry-run"]).command,
+        SyncCommand::Remove(SyncRemoveArgs {
+            force: true,
+            dry_run: true,
+            keep_bucket: false,
+        })
+    );
+}
+
+#[test]
 fn sync_dashboard_share_links_default_to_a_day() {
     let args = sync_args(&[
         "ccusage",

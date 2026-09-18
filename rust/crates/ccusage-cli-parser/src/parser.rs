@@ -7,8 +7,8 @@ use ccusage_cli::{
     CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS,
     OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder,
     StatuslineArgs, SyncArgs, SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs,
-    SyncMergeMachineArgs, SyncProvider, SyncRepairArgs, SyncRunArgs, SyncSetupArgs, VisualBurnRate,
-    WeekDay, WeeklyArgs, normalize_date_bound,
+    SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs, SyncRunArgs, SyncSetupArgs,
+    VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -509,6 +509,19 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
                 },
             )?;
             SyncCommand::MergeMachine(SyncMergeMachineArgs { from, into, yes })
+        }
+        "remove" => {
+            let mut args = SyncRemoveArgs::default();
+            parse_sync_options(parser, "remove", &mut json, &mut config_path, |flag, _| {
+                match flag {
+                    "-f" | "--force" => args.force = true,
+                    "--dry-run" => args.dry_run = true,
+                    "--keep-bucket" => args.keep_bucket = true,
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            })?;
+            SyncCommand::Remove(args)
         }
         "dashboard" => {
             let mut args = SyncDashboardArgs::default();

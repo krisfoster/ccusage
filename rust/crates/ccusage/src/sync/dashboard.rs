@@ -168,7 +168,7 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
 /// make every object readable. Splitting buckets makes the boundary the thing
 /// GCS actually enforces, and leaves the data bucket able to keep public access
 /// prevention enforced.
-fn assets_bucket(data_bucket: &str) -> String {
+pub(crate) fn assets_bucket(data_bucket: &str) -> String {
     /// Cloud Storage caps a bucket name at 63 characters, so a long data bucket
     /// loses its tail rather than producing a name the API refuses.
     const MAX_NAME: usize = 63;
