@@ -211,4 +211,10 @@ fn is_embedded_model(model: &str) -> bool {
         || model.starts_with("azure/")
         || model.starts_with("zai/")
         || model.starts_with("openrouter/openai/")
+        // Moonshot is a provider-comparison target whose models the models.dev
+        // fallback does not price, so without it the comparison table silently
+        // drops the provider. The other targets - Gemini, DeepSeek, xAI,
+        // Mistral - are already covered by that fallback and stay out of the
+        // binary.
+        || model.starts_with("moonshot/")
 }

@@ -3,9 +3,12 @@
 Cloud sync copies your local usage totals into an object storage bucket you own,
 so several machines can contribute to one view of your spend.
 
-`ccusage sync setup`, `ccusage sync run`, `ccusage sync status`, and
-`ccusage sync doctor` work today. `run` uploads Claude Code usage; the other
-agents and the dashboard arrive in later releases.
+`run` uploads usage from every agent ccusage supports — Claude Code, Codex,
+Gemini, Copilot, OpenCode, and the rest — stored one shard per agent per UTC
+day. An agent whose logs cannot be read is reported at the end of the run and
+skipped; the other agents still sync.
+
+See [Dashboard](/guide/dashboard) for reading the result back.
 
 ::: warning Google Cloud Storage only
 `--provider gcs` is the only provider so far. The storage layer is
@@ -150,6 +153,37 @@ Days are stored under this machine's own prefix, so two machines never overwrite
 each other's data and a day you sync from a laptop stays intact when a desktop
 syncs the same day.
 
+### How a run merges
+
+A run writes in a fixed order, and each step is only believed once the one
+before it landed:
+
+1. **Register.** The machine is added to the bucket's roster if it is not
+   already there, so a machine dropped from the roster puts itself back rather
+   than uploading into a void.
+2. **Upload the days that changed.** One object per agent per UTC day, named by
+   this machine, written before anything points at it.
+3. **Update this machine's index**, which is the list of days the machine
+   vouches for. This is a compare-and-swap: if another sync changed the index
+   first, the run re-reads it and re-applies, and only fails if that keeps
+   happening.
+4. **Record the sync time** on the machine's own record.
+5. **Prune**, if `--prune` was passed.
+6. **Recompute the totals** the dashboard reads — daily first, then the weekly,
+   monthly and per-model views derived from it — again under compare-and-swap.
+
+The order is what makes an interrupted run safe. A day's object that was
+uploaded but never indexed is *not* counted: nothing vouches for it, so a
+half-finished upload can never inflate your totals. The next run from that
+machine re-uploads and indexes it, and `ccusage sync repair` adopts it without
+waiting for that machine. The reverse — an index naming a day whose object is
+missing — is reported rather than counted as zero.
+
+Totals are always recomputed from the day objects the indexes vouch for, never
+added to in place, so a day that is re-uploaded with different contents
+replaces its old contribution instead of doubling it, and a re-run that finds
+nothing new leaves every number where it was.
+
 ### Settled days
 
 Two days after a UTC day ends, its uploaded data is marked settled and is not
@@ -201,8 +235,29 @@ days would go before any of them do.
 Every step is written in an order that makes a half-finished sync safe: a day's
 data is uploaded before the index that names it, and the index before the totals
 derived from it. A sync that is killed, loses its connection, or hits an expired
-credential leaves the bucket readable and correct — just missing the part it
-never wrote — and re-running picks up from there without duplicating anything.
+credential leaves the bucket readable and never counts anything twice, but it is
+not an all-or-nothing write. What it can leave behind is one of:
+
+- **An uploaded day nothing points at**, if it stopped between the upload and
+  the index. It does not count, and does not inflate anything.
+- **Totals that lag the indexes**, if it stopped after the index and before, or
+  part-way through, the recompute. The daily totals are written first and the
+  weekly, monthly and per-model views are derived from them, so those three can
+  briefly disagree with daily.
+
+In both cases the indexed days are the authority and nothing is lost. The next
+`ccusage sync run` — from any machine, not necessarily the one that stopped —
+recomputes the totals from them and the bucket agrees with itself again;
+`ccusage sync repair` does the same without waiting for a sync, and also adopts
+an uploaded day whose index write never landed.
+
+A write that succeeded but whose response never came back is equally harmless.
+Every object has a name derived from the machine, agent and day rather than
+from the attempt, so re-running writes the same name again instead of adding a
+second copy of the day. The same is true of a `--prune` that stopped half way:
+the days it did delete stay deleted, the rest are deleted when you run it
+again, and any day it removed before updating the index is reported as missing
+rather than counted.
 
 Two cases stop a run before it writes:
 
@@ -215,10 +270,79 @@ Two cases stop a run before it writes:
 `run`, `repair`, `forget`, and `merge-machine` all exit non-zero on failure and
 print what to do next.
 
+### Two syncs at once
+
+Only one sync writes at a time on a given machine. If a second `ccusage sync
+run` starts while one is still going — an overlapping scheduled job, a second
+terminal — it stops immediately:
+
+```
+another 'ccusage sync' is already running on this machine. Wait for it to
+finish, or delete ~/.local/state/ccusage/sync.lock if no sync is running.
+```
+
+`--dry-run` is never blocked, since it writes nothing. A sync killed part-way
+leaves the lock behind; it is ignored after an hour, or you can delete the file
+named in the message. Syncs on *different* machines are expected to overlap and
+are kept safe by the bucket itself rather than by this lock.
+
+### Data in the bucket that cannot be read
+
+A day's object that is corrupt or truncated — an upload cut off mid-write, a
+file edited by hand — is left out of the totals and named, rather than stopping
+the other machines from merging:
+
+```
+2 shard(s) could not be read and are left out of the totals; run
+'ccusage sync run' on the machine that wrote them to replace them.
+```
+
+Running `sync run` on the machine that owns those days rewrites them. Damage to
+the totals themselves is repaired in place: if the daily rollup cannot be read,
+the next sync rebuilds it from the days it is derived from and says so. The
+index of duplicate fingerprints is treated the same way — a copy that cannot be
+read, or one a newer ccusage wrote, is rebuilt from the days rather than
+trusted, which at worst counts a cross-machine duplicate until each day has
+been read again.
+
+Days your machine has usage for but cannot prepare for upload are also named,
+so a run never reports "nothing to sync" for usage that did not arrive.
+
+Three other kinds of disagreement are reported the same way — named, left out
+of the totals, and survivable:
+
+- **A day the index promises but the bucket does not hold**, usually a prune or
+  a `forget` that was interrupted. Re-running that command finishes the job;
+  syncing from the machine that owns the day puts it back.
+- **A day written by a newer ccusage** than the one reading it. It is skipped
+  whole rather than half-understood; upgrade the machine that is reading.
+- **A day whose contents name a different machine or date than its location
+  does.** It is refused rather than filed under the wrong machine, which would
+  make it invisible to the machine that actually owns it.
+
+If two machines are writing the same object at the same moment, the run re-reads
+and re-applies its change up to five times, then gives up with a message naming
+what kept changing, such as `the bucket's rollups kept changing under this
+sync`. Nothing is lost when that happens — the other machine's write is intact,
+and re-running once it has finished picks up where this one stopped.
+
 ## Maintenance
 
 These commands are for the rare occasions when the bucket's bookkeeping and its
 actual contents disagree, or when a machine is retired.
+
+| What you see | What to run |
+| --- | --- |
+| A total looks wrong, or a machine's days are missing from it | `ccusage sync repair` |
+| `shard(s) could not be read` | `ccusage sync run` on the machine named |
+| `missing from the bucket` after an interrupted prune or forget | re-run that command, or `ccusage sync repair` |
+| `kept changing under this sync` | re-run once the other machine has finished |
+| `another 'ccusage sync' is already running` | wait, or delete the lock file named |
+| A retired machine still counts | `ccusage sync forget <machine-id>` |
+| One machine appears twice after a reinstall | `ccusage sync merge-machine <old> <new>` |
+
+None of these except `forget` and `--prune` can delete usage, so `repair` is
+always safe to try first.
 
 ### Rebuilding from the data
 
@@ -262,10 +386,13 @@ want, `forget` the other machine, and merge again.
 ## Privacy
 
 Buckets ccusage creates use uniform bucket-level access and grant nothing to
-`allUsers`. When the dashboard ships, only its assets become public; usage data
-stays private and is shared through time-limited links rather than by opening the
-bucket. Setup and `doctor` both refuse to continue against a bucket that is
+`allUsers`. Setup and `doctor` both refuse to continue against a bucket that is
 readable by the world.
+
+Publishing a dashboard does not change that: the page is uploaded to a separate
+`<your-bucket>-dashboard` bucket, and that bucket is the only one made public.
+Usage data stays in the private bucket and is shared, if at all, through
+time-limited signed links.
 
 ## See also
 

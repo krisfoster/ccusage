@@ -14,9 +14,14 @@
 //! whereas a compare-and-swap on four objects could leave them inconsistent
 //! with each other.
 
+use std::collections::BTreeSet;
+
 use ccusage_objectstore::{Key, KeySpace, ObjectStore, ObjectStoreError, Precondition, RollupKind};
 use ccusage_sync::duplicates::{KEY_INDEX_SCHEMA, KeyIndex, mark_duplicates};
-use ccusage_sync::rollup::{ANOMALY_LATE_EDIT, Anomaly, Daily, ROLLUP_SCHEMA, ShardRef, derive};
+use ccusage_sync::rollup::{
+    ANOMALY_LATE_EDIT, ANOMALY_MISPLACED_SHARD, ANOMALY_UNREADABLE_SHARD, Anomaly, Daily,
+    ROLLUP_SCHEMA, ShardRef, derive,
+};
 use ccusage_sync::shard::{ParsedShard, Shard};
 use serde::Serialize;
 
@@ -40,6 +45,13 @@ pub(crate) struct RollupSummary {
     pub skipped_newer: usize,
     /// Shards an index promised that the bucket does not hold.
     pub missing: usize,
+    /// Shards the bucket holds but this build cannot parse.
+    pub unreadable: usize,
+    /// Shards whose contents name a different machine, agent or date than the
+    /// key they were found under.
+    pub misplaced: usize,
+    /// Whether `daily.json` was unreadable and rebuilt from the shards.
+    pub rebuilt_daily: bool,
     /// Days that changed after they had settled, across every machine.
     pub late_edits: usize,
     /// Cells another machine had already reported, left out of the totals.
@@ -76,6 +88,21 @@ impl RollupSummary {
                 self.missing
             ));
         }
+        if self.unreadable > 0 {
+            text.push_str(&format!(
+                " {} shard(s) could not be read and are left out of the totals; run 'ccusage sync run' on the machine that wrote them to replace them.",
+                self.unreadable
+            ));
+        }
+        if self.misplaced > 0 {
+            text.push_str(&format!(
+                " {} shard(s) name a different machine or day than the key they are stored under and are left out; run 'ccusage sync repair'.",
+                self.misplaced
+            ));
+        }
+        if self.rebuilt_daily {
+            text.push_str(" The daily rollup could not be read and was rebuilt from the shards.");
+        }
         text
     }
 }
@@ -88,14 +115,19 @@ pub(crate) fn refresh(
     now: &str,
 ) -> Result<RollupSummary> {
     for _ in 0..MAX_ATTEMPTS {
-        let (mut daily, generation) = read_daily(store, keys)?;
+        let DailyRead {
+            mut daily,
+            generation,
+            rebuilt,
+        } = read_daily(store, keys)?;
         let mut key_index = read_key_index(store, keys)?;
         let machines = bootstrap::manifest_machines(store, keys)?;
         let mut summary = RollupSummary {
             machines: machines.len(),
+            rebuilt_daily: rebuilt,
             ..RollupSummary::default()
         };
-        let mut live = Vec::new();
+        let mut live = BTreeSet::new();
         let mut anomalies = Vec::new();
 
         for machine_id in &machines {
@@ -109,7 +141,7 @@ pub(crate) fn refresh(
                     agent: agent.to_string(),
                     utc_date: utc_date.to_string(),
                 };
-                live.push(reference.key());
+                live.insert(reference.key());
                 if entry.late_edits > 0 {
                     summary.late_edits += 1;
                     anomalies.push(Anomaly {
@@ -135,7 +167,7 @@ pub(crate) fn refresh(
                     continue;
                 }
                 match load_shard(store, keys, user_id, &reference)? {
-                    Some(ParsedShard::Known(shard)) => {
+                    Loaded::Known(shard) => {
                         daily.apply(&shard);
                         key_index.apply(&shard);
                         summary.rolled_up += 1;
@@ -143,8 +175,36 @@ pub(crate) fn refresh(
                     // Counting a shard this build cannot fully read would
                     // under-report the day it covers, which is worse than
                     // leaving it out and saying so.
-                    Some(ParsedShard::Newer { .. }) => summary.skipped_newer += 1,
-                    None => summary.missing += 1,
+                    Loaded::Newer => summary.skipped_newer += 1,
+                    Loaded::Missing => summary.missing += 1,
+                    // One corrupt object must not stop every other machine
+                    // from merging, so it is reported like a missing one and
+                    // the day keeps whatever was last read from it.
+                    Loaded::Unreadable(detail) => {
+                        summary.unreadable += 1;
+                        anomalies.push(Anomaly {
+                            kind: ANOMALY_UNREADABLE_SHARD.to_string(),
+                            machine_id: machine_id.clone(),
+                            agent: agent.to_string(),
+                            utc_date: utc_date.to_string(),
+                            detected_at: now.to_string(),
+                            detail: Some(detail),
+                        });
+                    }
+                    // Applying it would add cells under the identity in the
+                    // body and then drop them as stale, because the key is
+                    // what `live` is built from.
+                    Loaded::Misplaced(found) => {
+                        summary.misplaced += 1;
+                        anomalies.push(Anomaly {
+                            kind: ANOMALY_MISPLACED_SHARD.to_string(),
+                            machine_id: machine_id.clone(),
+                            agent: agent.to_string(),
+                            utc_date: utc_date.to_string(),
+                            detected_at: now.to_string(),
+                            detail: Some(format!("the object says it is {found}")),
+                        });
+                    }
                 }
             }
         }
@@ -218,11 +278,11 @@ fn read_key_index(store: &dyn ObjectStore, keys: &KeySpace) -> Result<KeyIndex> 
     Ok(index)
 }
 
-fn stale_refs(daily: &Daily, live: &[String]) -> Vec<ShardRef> {
+fn stale_refs(daily: &Daily, live: &BTreeSet<String>) -> Vec<ShardRef> {
     daily
         .based_on
         .keys()
-        .filter(|key| !live.contains(key))
+        .filter(|key| !live.contains(*key))
         .filter_map(|key| {
             let mut parts = key.splitn(3, '/');
             Some(ShardRef {
@@ -234,37 +294,94 @@ fn stale_refs(daily: &Daily, live: &[String]) -> Vec<ShardRef> {
         .collect()
 }
 
-fn read_daily(store: &dyn ObjectStore, keys: &KeySpace) -> Result<(Daily, Option<String>)> {
-    let key = keys.rollup(RollupKind::Daily);
-    let Some((body, meta)) = store.get(&key).map_err(|error| error.to_string())? else {
-        return Ok((Daily::default(), None));
-    };
-    let daily: Daily = serde_json::from_slice(&body)
-        .map_err(|error| format!("{} is not readable: {error}", key.path()))?;
-    // A rollup written by a newer ccusage is rebuilt from the shards rather
-    // than half-read; the shards, not the rollup, are the source of truth.
-    if daily.schema > ROLLUP_SCHEMA {
-        return Ok((Daily::default(), meta.generation));
-    }
-    Ok((daily, meta.generation))
+/// `daily.json` as this pass will use it, and the generation to write back at.
+struct DailyRead {
+    daily: Daily,
+    generation: Option<String>,
+    /// The stored rollup was unusable, so this pass starts from nothing and
+    /// re-reads every shard.
+    rebuilt: bool,
 }
 
+/// A daily rollup this build cannot use is rebuilt from the shards rather than
+/// being fatal.
+///
+/// It is derived state — `sync repair` rebuilds it from the same shards — so
+/// refusing to sync until the user runs repair buys nothing, and `daily.json`
+/// is the object with the most writers and so the most likely to be found
+/// half-written. Rebuilding costs one pass that reads every shard.
+fn read_daily(store: &dyn ObjectStore, keys: &KeySpace) -> Result<DailyRead> {
+    let key = keys.rollup(RollupKind::Daily);
+    let Some((body, meta)) = store.get(&key).map_err(|error| error.to_string())? else {
+        return Ok(DailyRead {
+            daily: Daily::default(),
+            generation: None,
+            rebuilt: false,
+        });
+    };
+    // A rollup written by a newer ccusage is rebuilt from the shards rather
+    // than half-read; the shards, not the rollup, are the source of truth.
+    // That is a version difference rather than damage, so it is not reported
+    // as a rebuild.
+    match serde_json::from_slice::<Daily>(&body) {
+        Ok(daily) if daily.schema <= ROLLUP_SCHEMA => Ok(DailyRead {
+            daily,
+            generation: meta.generation,
+            rebuilt: false,
+        }),
+        Ok(_) => Ok(DailyRead {
+            daily: Daily::default(),
+            generation: meta.generation,
+            rebuilt: false,
+        }),
+        Err(_) => Ok(DailyRead {
+            daily: Daily::default(),
+            generation: meta.generation,
+            rebuilt: true,
+        }),
+    }
+}
+
+/// What reading a shard object found.
+enum Loaded {
+    Known(Box<Shard>),
+    Newer,
+    Missing,
+    /// The object is there but is not a shard this build can parse.
+    Unreadable(String),
+    /// The object parsed, but names a different shard than its key. Carries
+    /// the identity the body claims.
+    Misplaced(String),
+}
+
+/// Reads one shard. Only the store failing is an error: everything the object
+/// itself can be wrong about is reported and skipped, so one bad shard cannot
+/// stop the other machines from merging.
 fn load_shard(
     store: &dyn ObjectStore,
     keys: &KeySpace,
     user_id: &str,
     reference: &ShardRef,
-) -> Result<Option<ParsedShard>> {
+) -> Result<Loaded> {
     let date = parse_date(&reference.utc_date)?;
     let key = keys
         .shard(user_id, &reference.machine_id, &reference.agent, date)
         .map_err(|error| error.to_string())?;
     let Some((body, _)) = store.get(&key).map_err(|error| error.to_string())? else {
-        return Ok(None);
+        return Ok(Loaded::Missing);
     };
-    Shard::parse(&body)
-        .map(Some)
-        .map_err(|error| format!("{} is not readable: {error}", key.path()))
+    match Shard::parse(&body) {
+        Ok(ParsedShard::Known(shard)) => {
+            let found = ShardRef::of(&shard);
+            if found == *reference {
+                Ok(Loaded::Known(shard))
+            } else {
+                Ok(Loaded::Misplaced(found.key()))
+            }
+        }
+        Ok(ParsedShard::Newer { .. }) => Ok(Loaded::Newer),
+        Err(error) => Ok(Loaded::Unreadable(error.to_string())),
+    }
 }
 
 fn put<T: Serialize>(
@@ -527,6 +644,115 @@ mod tests {
 
         assert_eq!(summary.missing, 1);
         assert!(summary.to_text().contains("missing from the bucket"));
+    }
+
+    /// A half-written or corrupted object must cost the bucket one day, not
+    /// every machine's rollup: the other machines' shards are fine.
+    #[test]
+    fn a_shard_that_cannot_be_parsed_is_reported_and_the_other_machines_still_merge() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        publish(&store, &keys, &shard("bbbb", "2026-09-17", 50));
+        let key = keys
+            .shard(
+                USER,
+                "aaaa",
+                "claude",
+                parse_date("2026-09-17").expect("date"),
+            )
+            .expect("key");
+        store
+            .put(
+                &key,
+                b"{\"schema\":1,\"cells\":",
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("truncate the object");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.unreadable, 1);
+        assert_eq!(summary.rolled_up, 1, "the healthy machine still merged");
+        assert!(summary.to_text().contains("could not be read"));
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 50);
+        let daily = read_daily_object(&store, &keys);
+        assert!(
+            daily
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == ANOMALY_UNREADABLE_SHARD
+                    && anomaly.machine_id == "aaaa"),
+            "the dashboard is told which shard is unreadable: {:?}",
+            daily.anomalies
+        );
+    }
+
+    /// The body and the key are two claims about the same shard. Applying a
+    /// body that disagrees would file cells under one identity and then drop
+    /// them as stale under the other, losing them without a word.
+    #[test]
+    fn a_shard_whose_body_names_a_different_machine_is_left_out_and_flagged() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        let imposter = shard("cccc", "2026-09-17", 999);
+        let key = keys
+            .shard(
+                USER,
+                "aaaa",
+                "claude",
+                parse_date("2026-09-17").expect("date"),
+            )
+            .expect("key");
+        store
+            .put(
+                &key,
+                &imposter.to_json().expect("serialize"),
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("overwrite");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert_eq!(summary.misplaced, 1);
+        assert_eq!(summary.rolled_up, 0);
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 0);
+        assert!(summary.to_text().contains("sync repair"));
+        assert!(
+            read_daily_object(&store, &keys)
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == ANOMALY_MISPLACED_SHARD)
+        );
+    }
+
+    /// `daily.json` is derived from the shards and has more writers than any
+    /// other object, so damage to it is recoverable in place rather than a
+    /// reason to refuse to sync.
+    #[test]
+    fn an_unreadable_daily_rollup_is_rebuilt_from_the_shards() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        publish(&store, &keys, &shard("aaaa", "2026-09-17", 100));
+        refresh(&store, &keys, USER, NOW).expect("first");
+        store
+            .put(
+                &keys.rollup(RollupKind::Daily),
+                b"{ half a rollup",
+                "application/json",
+                &Precondition::None,
+            )
+            .expect("corrupt the rollup");
+
+        let summary = refresh(&store, &keys, USER, NOW).expect("refresh");
+
+        assert!(summary.rebuilt_daily);
+        assert_eq!(summary.rolled_up, 1, "every shard is re-read");
+        assert_eq!(read_daily_object(&store, &keys).totals().input_tokens, 100);
+        assert!(summary.to_text().contains("rebuilt from the shards"));
     }
 
     /// Two machines reading the same synced log directory report the same

@@ -222,16 +222,17 @@ pub(crate) fn ensure_private(admin: &BucketAdmin, spec: &BucketSpec) -> Result<B
     Ok(info)
 }
 
-/// An unconditional `allUsers`/`allAuthenticatedUsers` binding. Conditional ones
-/// are left alone: the dashboard's own grant is conditional on the public prefix,
-/// and re-running setup must not trip over it.
+/// Any `allUsers`/`allAuthenticatedUsers` binding, conditional or not.
+///
+/// GCS rejects conditions on public members, so there is no such thing as a
+/// narrowly-scoped public binding to tolerate here: the dashboard lives in its
+/// own bucket, and a public binding on the data bucket is always a leak.
 pub(crate) fn public_member(policy: &Value) -> Option<String> {
     policy
         .get("bindings")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|binding| binding.get("condition").is_none())
         .filter_map(|binding| binding.get("members").and_then(Value::as_array))
         .flatten()
         .filter_map(Value::as_str)
@@ -443,8 +444,10 @@ mod tests {
         assert_eq!(public_member(&policy).as_deref(), Some("allUsers"));
     }
 
+    /// A prefix condition cannot narrow a public binding on GCS, so one on the
+    /// data bucket publishes usage data and has to be reported.
     #[test]
-    fn the_dashboards_own_conditional_grant_is_not_a_leak() {
+    fn a_conditional_public_binding_is_still_a_leak() {
         let policy = json!({
             "bindings": [
                 {
@@ -452,6 +455,16 @@ mod tests {
                     "members": ["allUsers"],
                     "condition": { "expression": "resource.name.startsWith('x')" },
                 },
+            ]
+        });
+
+        assert_eq!(public_member(&policy).as_deref(), Some("allUsers"));
+    }
+
+    #[test]
+    fn a_private_policy_has_no_public_member() {
+        let policy = json!({
+            "bindings": [
                 { "role": "roles/storage.admin", "members": ["user:me@example.com"] },
             ]
         });

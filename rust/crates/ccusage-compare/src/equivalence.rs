@@ -17,6 +17,14 @@ const EMBEDDED: &str = include_str!("model-equivalence.json");
 pub struct Provider {
     pub id: String,
     pub label: String,
+    /// Where the provider publishes the rates, so a reader can check a price
+    /// against its source rather than taking this table's word for it.
+    #[serde(
+        default,
+        rename = "pricingUrl",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pricing_url: Option<String>,
 }
 
 /// A class of model — the level of capability someone would swap like for

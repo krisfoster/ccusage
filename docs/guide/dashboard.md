@@ -12,6 +12,8 @@ ccusage sync dashboard
 
 This reads the rollups with your own credentials, serves them from `127.0.0.1`, and prints the URL. Nothing is uploaded, nothing is made public, and no token leaves the process. Add `--open` to launch a browser.
 
+The server answers `localhost`, `127.0.0.1`, and `::1` only, so a page elsewhere on the internet cannot reach it by pointing a hostname of its own at your loopback address.
+
 Run `ccusage sync run` first — the dashboard renders the rollups in the bucket, not your local logs.
 
 ## Publish it
@@ -20,7 +22,9 @@ Run `ccusage sync run` first — the dashboard renders the rollups in the bucket
 ccusage sync dashboard --deploy
 ```
 
-This uploads the page (`index.html`, `app.js`, `styles.css`) plus the third-party price table and the model-equivalence map to `<prefix>/dashboard/` and grants `allUsers` read on **that prefix only**, through an IAM condition. Your shards and rollups are not uploaded there and stay private.
+This uploads the page (`index.html`, `app.js`, `styles.css`) plus the third-party price table and the model-equivalence map to a **second bucket**, `<your-bucket>-dashboard`, created on demand and made world-readable. Your shards, rollups, manifests, and salts stay in the original bucket, which stays private.
+
+Two buckets rather than a public prefix because GCS rejects an IAM condition on an `allUsers` binding (`Conditions are not allowed on public resources`), so a bucket is the only boundary it will enforce for a public grant. The dashboard bucket holds the page and published price data and nothing else.
 
 A deployed page with no link shows an explanation rather than data. That is the intended resting state.
 
@@ -47,10 +51,12 @@ Share links need an HMAC credential (`CCUSAGE_SYNC_HMAC_ACCESS_ID` / `CCUSAGE_SY
 ## What the page shows
 
 - Totals for the selected window, plus freshness per machine.
-- Daily spend, re-bucketed into the timezone you pick — the stored data is 15-minute UTC cells, so `+05:45` and DST transitions are handled honestly rather than by rounding to a UTC day.
+- Daily spend as a chart with a currency axis, gridlines, and dated ticks, re-bucketed into the timezone you pick — the stored data is 15-minute UTC cells, so `+05:45` and DST transitions are handled honestly rather than by rounding to a UTC day.
 - Breakdowns by model, machine, and agent, and weekly and monthly tables.
 - Late-edit anomalies and cross-machine duplicate suppression, so a number that looks low has a visible reason.
+- Usage from every agent ccusage supports — Claude, Codex, Gemini, Copilot, and the rest — folded per agent, not Claude alone.
 - A provider comparison table using the same arithmetic as [`ccusage compare`](/guide/provider-comparison) — token counts repriced at another provider's standard list rates.
+- A published price table: every comparison model with its input, output, and cache rates per million tokens, each model linking to where its provider states the rate, and every column sortable.
 
 ## Custom domains
 

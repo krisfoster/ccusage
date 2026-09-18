@@ -6,14 +6,15 @@
 //! run converges instead of failing.
 //!
 //! The access shape is the whole point of the module. The dashboard shell is
-//! world-readable and every usage object is private, which on GCS means uniform
-//! bucket-level access (conditions are ignored without it), public access
-//! prevention left `inherited` rather than `enforced` (enforced would refuse the
-//! `allUsers` binding outright), and a single conditional `allUsers` binding
-//! scoped by object-name prefix. Get any one of those wrong and the bucket
+//! world-readable and every usage object is private. A prefix-scoped public
+//! binding would express that in one bucket, but GCS refuses it — an `allUsers`
+//! binding cannot carry an IAM condition ("Conditions are not allowed on public
+//! resources"), so the boundary has to be the bucket itself: the data bucket
+//! never becomes public, and the dashboard shell is deployed to a second,
+//! separate bucket that holds nothing else. Get that wrong and the bucket
 //! either serves nothing or serves the user's spend to the internet.
 
-use ccusage_objectstore::{KeySpace, ObjectStoreError, Result};
+use ccusage_objectstore::{ObjectStoreError, Result};
 use serde_json::{Value, json};
 
 use super::{JsonApi, encode, status_error};
@@ -24,10 +25,9 @@ const DEFAULT_IAM_CREDENTIALS_ENDPOINT: &str = "https://iamcredentials.googleapi
 
 /// Whether the bucket refuses to become public.
 ///
-/// `Enforced` blocks the `allUsers` binding the dashboard needs, so a bucket
-/// that will serve a dashboard is created `Inherited` and relies on the
-/// conditional binding to keep the blast radius to the public prefix. A bucket
-/// with no dashboard can stay `Enforced`.
+/// `Enforced` blocks the `allUsers` binding, so the public assets bucket is
+/// created `Inherited`. The data bucket has no reason to ever be public and is
+/// left `Enforced`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PublicAccessPrevention {
     Enforced,
@@ -281,15 +281,17 @@ impl BucketAdmin {
         })
     }
 
-    /// Grants `allUsers` object read access restricted to the public dashboard
-    /// prefix, and only that prefix.
+    /// Grants `allUsers` object read access on this whole bucket.
+    ///
+    /// Unconditional, because GCS rejects an IAM condition on a binding whose
+    /// member is public. Containment therefore comes from *which* bucket this
+    /// is called on: only the dashboard assets bucket, never the data bucket.
     ///
     /// Read-modify-write on the policy `etag`, so a concurrent edit loses rather
     /// than being clobbered. Re-running is a no-op once the binding is present,
-    /// which keeps `sync setup` idempotent.
-    pub(crate) fn grant_public_dashboard_read(&self, keys: &KeySpace) -> Result<bool> {
+    /// which keeps deploys idempotent.
+    pub(crate) fn grant_public_read(&self) -> Result<bool> {
         let mut policy = self.get_iam_policy()?;
-        let condition = public_prefix_condition(&self.bucket, keys);
         let bindings = policy
             .get_mut("bindings")
             .and_then(Value::as_array_mut)
@@ -300,11 +302,7 @@ impl BucketAdmin {
                     .get("members")
                     .and_then(Value::as_array)
                     .is_some_and(|members| members.iter().any(|member| member == "allUsers"))
-                && binding
-                    .get("condition")
-                    .and_then(|existing| string_at(existing, "expression"))
-                    .as_deref()
-                    == Some(condition.as_str())
+                && binding.get("condition").is_none()
         }) {
             return Ok(false);
         }
@@ -312,11 +310,6 @@ impl BucketAdmin {
         updated.push(json!({
             "role": "roles/storage.objectViewer",
             "members": ["allUsers"],
-            "condition": {
-                "title": "ccusage-public-dashboard",
-                "description": "Public dashboard assets only; usage data stays private.",
-                "expression": condition,
-            },
         }));
         let etag = string_at(&policy, "etag");
         let mut request = json!({ "version": 3, "bindings": updated });
@@ -384,17 +377,6 @@ enum Method {
     Put,
 }
 
-/// The condition that keeps `allUsers` inside the public prefix.
-///
-/// Taken from the key builder rather than from a caller-supplied string, so the
-/// grant cannot drift away from the only prefix that produces public keys.
-fn public_prefix_condition(bucket: &str, keys: &KeySpace) -> String {
-    format!(
-        "resource.name.startsWith(\"projects/_/buckets/{bucket}/objects/{}\")",
-        keys.public_prefix(),
-    )
-}
-
 fn parse_bucket(bucket: &str, body: &[u8]) -> Result<BucketInfo> {
     let value: Value = serde_json::from_slice(body).map_err(|error| ObjectStoreError::Other {
         detail: format!("unreadable bucket resource for {bucket}: {error}"),
@@ -426,10 +408,6 @@ mod tests {
         super::{BearerToken, RetryPolicy},
         *,
     };
-
-    fn keys() -> KeySpace {
-        KeySpace::new("ccusage").expect("prefix")
-    }
 
     fn no_retry() -> RetryPolicy {
         RetryPolicy {
@@ -581,28 +559,23 @@ mod tests {
         assert!(request.contains(r#""method":["GET","HEAD"]"#), "{request}");
     }
 
+    /// GCS rejects a condition on a public member, so the binding is
+    /// unconditional and the containment is the bucket this runs against.
     #[test]
-    fn the_public_binding_is_conditional_on_the_dashboard_prefix() {
+    fn the_public_binding_carries_no_condition() {
         let mut fake = ScriptedServer::serving(vec![
             json(200, r#"{"version":1,"etag":"BwXhfw==","bindings":[]}"#),
             json(200, "{}"),
         ]);
 
-        let granted = admin_for(&fake)
-            .grant_public_dashboard_read(&keys())
-            .expect("grant");
+        let granted = admin_for(&fake).grant_public_read().expect("grant");
 
         assert!(granted);
         let write = fake.requests().remove(1);
         assert!(write.starts_with("PUT "), "{write}");
         assert!(write.contains(r#""etag":"BwXhfw==""#), "{write}");
         assert!(write.contains(r#""members":["allUsers"]"#), "{write}");
-        assert!(
-            write.contains(
-                r#"resource.name.startsWith(\"projects/_/buckets/ccusage-abc123/objects/ccusage/dashboard/\")"#
-            ),
-            "the binding must not reach beyond the public prefix: {write}"
-        );
+        assert!(!write.contains("condition"), "{write}");
         assert!(write.contains("\"version\":3"), "{write}");
     }
 
@@ -612,21 +585,12 @@ mod tests {
             "version": 3,
             "etag": "BwXhfw==",
             "bindings": [
-                {
-                    "role": "roles/storage.objectViewer",
-                    "members": ["allUsers"],
-                    "condition": {
-                        "title": "ccusage-public-dashboard",
-                        "expression": "resource.name.startsWith(\"projects/_/buckets/ccusage-abc123/objects/ccusage/dashboard/\")"
-                    }
-                }
+                { "role": "roles/storage.objectViewer", "members": ["allUsers"] }
             ]
         }"#;
         let mut fake = ScriptedServer::serving(vec![json(200, existing)]);
 
-        let granted = admin_for(&fake)
-            .grant_public_dashboard_read(&keys())
-            .expect("grant");
+        let granted = admin_for(&fake).grant_public_read().expect("grant");
 
         assert!(!granted);
         assert_eq!(fake.requests().len(), 1);
@@ -643,9 +607,7 @@ mod tests {
         }"#;
         let mut fake = ScriptedServer::serving(vec![json(200, existing), json(200, "{}")]);
 
-        admin_for(&fake)
-            .grant_public_dashboard_read(&keys())
-            .expect("grant");
+        admin_for(&fake).grant_public_read().expect("grant");
 
         let write = fake.requests().remove(1);
         assert!(write.contains("roles/storage.objectAdmin"), "{write}");

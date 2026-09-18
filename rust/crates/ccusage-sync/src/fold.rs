@@ -388,7 +388,7 @@ mod tests {
         second.machine_id = "machine-2";
         let shared = entry(at(0), "claude-sonnet-4-5", "m1");
 
-        let left = fold(&[shared.clone()], &first);
+        let left = fold(std::slice::from_ref(&shared), &first);
         let right = fold(&[shared], &second);
 
         assert_eq!(left[0].cells[0].keys, right[0].cells[0].keys);

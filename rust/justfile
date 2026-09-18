@@ -11,3 +11,36 @@ default:
 # Run the Rust workspace tests
 test:
     cargo test --workspace
+
+# Line coverage of the cloud-sync, comparison and dashboard code, gated.
+#
+# Scoped rather than workspace-wide: the gate is a promise about the code this
+# work added, and averaging it into a much larger existing tree would let a
+# regression in it hide.
+#
+# Needs cargo-llvm-cov (`cargo install cargo-llvm-cov`) and the
+# llvm-tools-preview rustup component.
+coverage-sync threshold="85":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scope='crates/(ccusage-sync|ccusage-objectstore|ccusage-compare|ccusage-dashboard)/src/|crates/ccusage/src/(sync|gcs)/|crates/ccusage/src/(sync|compare|credentials)\.rs'
+    cargo llvm-cov --workspace --json --summary-only --output-path target/llvm-cov.json
+    jq -r --arg scope "$scope" --argjson min '{{threshold}}' '
+      [.data[0].files[] | select(.filename | test($scope))] as $files
+      | ($files | map(.summary.lines.count) | add) as $lines
+      | ($files | map(.summary.lines.covered) | add) as $covered
+      | "cloud sync, comparison and dashboard: \($covered)/\($lines) lines, " +
+        "\(($covered * 10000 / $lines | round) / 100)% (gate \($min)%)",
+        ($files
+          | sort_by(.summary.lines.percent)
+          | limit(5; .[])
+          | "  \((.summary.lines.percent * 100 | round) / 100)%  \(.filename | sub(".*/crates/"; ""))")
+    ' target/llvm-cov.json
+    jq -e --arg scope "$scope" --argjson min '{{threshold}}' '
+      [.data[0].files[] | select(.filename | test($scope))] as $files
+      | ($files | map(.summary.lines.covered) | add) * 100
+        >= ($files | map(.summary.lines.count) | add) * $min
+    ' target/llvm-cov.json > /dev/null || {
+        echo "coverage is below the {{threshold}}% gate" >&2
+        exit 1
+    }

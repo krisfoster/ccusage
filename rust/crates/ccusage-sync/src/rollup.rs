@@ -31,6 +31,15 @@ pub const ROLLUP_SCHEMA: u32 = 1;
 /// showed before may have changed underneath a reader.
 pub const ANOMALY_LATE_EDIT: &str = "lateEdit";
 
+/// A shard object exists but cannot be parsed, so the day it covers is left at
+/// whatever was last read from it rather than counted from the object.
+pub const ANOMALY_UNREADABLE_SHARD: &str = "unreadableShard";
+
+/// A shard's own machine, agent or date disagrees with the key it was found
+/// under. Applying it would file the usage under one identity and forget it
+/// under the other, so it is left out until it is rewritten.
+pub const ANOMALY_MISPLACED_SHARD: &str = "misplacedShard";
+
 /// Something the totals cannot express on their own: a day that changed after
 /// it settled, usage two machines both reported, a price that was missing.
 ///

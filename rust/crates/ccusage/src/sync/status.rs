@@ -62,8 +62,9 @@ impl Status {
             "machineId": self.machine_id,
             "machineLabel": self.machine_label,
             "userId": self.user_id,
-            // No sync has ever run: the upload path lands in a later release, and
-            // reporting a timestamp of "now" or 0 would both be lies.
+            // The last sync time lives in the bucket's machine record, and
+            // status does not read the bucket. The field is kept so the shape
+            // does not change for a caller once it does.
             "lastSyncAt": Value::Null,
         })
     }

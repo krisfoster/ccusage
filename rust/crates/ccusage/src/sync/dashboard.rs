@@ -6,15 +6,18 @@
 //! - **Local** (the default): a server bound to loopback reads the rollups with
 //!   this machine's own credentials and serves them alongside the bundle.
 //!   Nothing becomes public, and no token leaves the process.
-//! - **Deployed** (`--deploy`): the bundle is uploaded under the one prefix
-//!   `allUsers` can read. The rollups are *not* uploaded there — they are
-//!   already in the bucket, private — so a deployed page shows nothing until it
-//!   is opened with a `--share` link, whose signed URLs ride in the location
-//!   fragment and therefore never reach a server log.
+//! - **Deployed** (`--deploy`): the bundle is uploaded to a *second* bucket,
+//!   `<data-bucket>-dashboard`, which is world-readable and holds nothing else.
+//!   A prefix-scoped public binding inside the data bucket would be neater, but
+//!   GCS refuses an IAM condition on an `allUsers` member, so the only boundary
+//!   it will actually enforce is the bucket. The rollups stay in the private
+//!   data bucket, so a deployed page shows nothing until it is opened with a
+//!   `--share` link, whose signed URLs ride in the location fragment and
+//!   therefore never reach a server log.
 //!
-//! The public/private split is enforced by the key space, not by care taken
-//! here: `dashboard_asset` is the only constructor that yields a public key,
-//! and every rollup key is private by construction.
+//! The public/private split is enforced twice over: by the bucket, and by the
+//! key space — `dashboard_asset` is the only constructor that yields a public
+//! key, and every rollup key is private by construction.
 
 use std::{
     io::{BufRead as _, BufReader, Write as _},
@@ -41,7 +44,7 @@ use crate::{
     cli_error,
     gcs::{
         GcsStore, JsonApi, RetryPolicy,
-        bucket::{BucketAdmin, PublicAccessPrevention},
+        bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
     },
     pricing::PricingMap,
 };
@@ -81,8 +84,25 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
         std::collections::BTreeMap::new().iter(),
     ));
 
+    let assets_bucket = assets_bucket(&bucket);
+
     if args.deploy {
-        deploy(&store, &keys, &bucket, &credentials, &public)?;
+        let Some(project) = status.project_id.clone() else {
+            return Err(cli_error(
+                "sync has no project recorded. Re-run 'ccusage sync setup'.".to_string(),
+            ));
+        };
+        deploy(
+            &keys,
+            &assets_bucket,
+            &project,
+            status
+                .location
+                .as_deref()
+                .unwrap_or(super::DEFAULT_LOCATION),
+            &credentials,
+            &public,
+        )?;
     }
 
     let link = if args.share {
@@ -95,7 +115,13 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
                     .to_string(),
             )
         })?;
-        Some(share_link(&bucket, &keys, hmac, args.share_ttl_seconds)?)
+        Some(share_link(
+            &bucket,
+            &assets_bucket,
+            &keys,
+            hmac,
+            args.share_ttl_seconds,
+        )?)
     } else {
         None
     };
@@ -117,7 +143,7 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             Ok(())
         }
         (true, None) => {
-            let url = public_url(&bucket, &keys);
+            let url = public_url(&assets_bucket, &keys);
             println!("\nDashboard: {url}");
             println!(
                 "The page is public; the usage data is not. Run `ccusage sync dashboard --share` \
@@ -134,10 +160,33 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
 
 /* ------------------------------------------------------------------ deploy */
 
+/// The page lives in its own bucket, next to the data bucket and named after
+/// it.
+///
+/// GCS refuses an IAM condition on an `allUsers` binding, so a public *prefix*
+/// inside the data bucket is not expressible: making the shell readable would
+/// make every object readable. Splitting buckets makes the boundary the thing
+/// GCS actually enforces, and leaves the data bucket able to keep public access
+/// prevention enforced.
+fn assets_bucket(data_bucket: &str) -> String {
+    /// Cloud Storage caps a bucket name at 63 characters, so a long data bucket
+    /// loses its tail rather than producing a name the API refuses.
+    const MAX_NAME: usize = 63;
+    const SUFFIX: &str = "-dashboard";
+
+    let head_len = MAX_NAME - SUFFIX.len();
+    let head = data_bucket
+        .get(..head_len)
+        .unwrap_or(data_bucket)
+        .trim_end_matches(['-', '.', '_']);
+    format!("{head}{SUFFIX}")
+}
+
 fn deploy(
-    store: &GcsStore,
     keys: &KeySpace,
-    bucket: &str,
+    assets_bucket: &str,
+    project: &str,
+    location: &str,
     credentials: &Arc<crate::credentials::Credentials>,
     public: &[(String, Vec<u8>, &'static str)],
 ) -> Result<()> {
@@ -147,10 +196,17 @@ fn deploy(
             Box::new(Arc::clone(credentials)),
             RetryPolicy::default(),
         ),
-        bucket,
+        assets_bucket,
     );
-    // An org policy may have re-enforced prevention since setup, and the public
-    // binding below would then be refused with a bare 403.
+    let mut spec = BucketSpec::new(project, location);
+    spec.public_access_prevention = PublicAccessPrevention::Inherited;
+    admin.ensure(&spec).map_err(|error| {
+        cli_error(format!(
+            "could not create the dashboard bucket {assets_bucket}: {error}"
+        ))
+    })?;
+    // An org policy may enforce prevention on new buckets, which would refuse
+    // the public binding below with a bare 403.
     if let Ok(Some(info)) = admin.get()
         && info.public_access_prevention == Some(PublicAccessPrevention::Enforced)
     {
@@ -158,31 +214,33 @@ fn deploy(
             .set_public_access_prevention(PublicAccessPrevention::Inherited)
             .map_err(|error| {
                 cli_error(format!(
-                    "this bucket prevents public access and it could not be relaxed: {error}. \
-                         Deploying the dashboard needs public access prevention set to \
-                         'inherited'; the data stays private either way."
+                    "{assets_bucket} prevents public access and it could not be relaxed: {error}. \
+                     A published dashboard needs public access prevention set to 'inherited' on \
+                     that bucket; your usage data is in a different bucket and stays private."
                 ))
             })?;
     }
 
+    let store = GcsStore::new(assets_bucket, Box::new(Arc::clone(credentials)));
     for asset in ASSETS {
-        put_public(store, keys, asset.path, asset.bytes, asset.content_type)?;
+        put_public(&store, keys, asset.path, asset.bytes, asset.content_type)?;
     }
     for (path, bytes, content_type) in public {
-        put_public(store, keys, path, bytes, content_type)?;
+        put_public(&store, keys, path, bytes, content_type)?;
     }
 
     let granted = admin
-        .grant_public_dashboard_read(keys)
+        .grant_public_read()
         .map_err(|error| cli_error(error.to_string()))?;
     println!(
-        "Uploaded {} file(s) to {}{}",
+        "Uploaded {} file(s) to gs://{assets_bucket}/{}{}",
         ASSETS.len() + public.len(),
         keys.public_prefix(),
         if granted {
-            ", and granted public read on that prefix only."
+            ", and made that bucket world-readable. It holds the page only; your usage data is in \
+             a separate, private bucket."
         } else {
-            "; public read on that prefix was already granted."
+            "; that bucket was already world-readable."
         }
     );
     Ok(())
@@ -214,7 +272,13 @@ fn public_url(bucket: &str, keys: &KeySpace) -> String {
 /* -------------------------------------------------------------- share link */
 
 /// The rollups a viewer needs, as signed URLs carried in the fragment.
-fn share_link(bucket: &str, keys: &KeySpace, hmac: &HmacKey, ttl_seconds: u64) -> Result<String> {
+fn share_link(
+    bucket: &str,
+    assets_bucket: &str,
+    keys: &KeySpace,
+    hmac: &HmacKey,
+    ttl_seconds: u64,
+) -> Result<String> {
     let signer = Signer::new(GOOG4_HMAC_SHA256, "auto", "storage");
     let now = now_secs();
     let time =
@@ -244,7 +308,7 @@ fn share_link(bucket: &str, keys: &KeySpace, hmac: &HmacKey, ttl_seconds: u64) -
         .map_err(|error| cli_error(format!("could not build the share link: {error}")))?;
     Ok(format!(
         "{}#s={}",
-        public_url(bucket, keys),
+        public_url(assets_bucket, keys),
         base64url(&payload)
     ))
 }
@@ -269,17 +333,23 @@ fn public_data(pricing: &PricingMap) -> Vec<(String, Vec<u8>, &'static str)> {
     let map = EquivalenceMap::embedded();
     let mut models = serde_json::Map::new();
     for tier in &map.tiers {
-        for target in tier.models.values() {
+        for (provider_id, target) in &tier.models {
             if models.contains_key(target) {
                 continue;
             }
             let Some(rates) = pricing.find_exact_with_fallback(target) else {
                 continue;
             };
+            let provider = map.provider(provider_id);
             const PER_MILLION: f64 = 1_000_000.0;
             models.insert(
                 target.clone(),
                 json!({
+                    "provider": provider.map(|provider| provider.label.clone()),
+                    "tier": tier.label,
+                    // The rate itself comes from the licensed snapshot; the
+                    // link is where a reader can check it against the vendor.
+                    "source": provider.and_then(|provider| provider.pricing_url.clone()),
                     "input": rates.input * PER_MILLION,
                     "output": rates.output * PER_MILLION,
                     "cacheWrite": rates
@@ -396,6 +466,32 @@ fn respond(
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let path = line.split_whitespace().nth(1).unwrap_or("/");
+
+    let mut host = String::new();
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("host")
+        {
+            host = value.trim().to_string();
+        }
+    }
+    if !host_is_loopback(&host) {
+        let body = b"the ccusage dashboard answers loopback names only".as_slice();
+        stream.write_all(
+            format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        stream.write_all(body)?;
+        return stream.flush();
+    }
     let requested = path
         .split('?')
         .next()
@@ -439,6 +535,19 @@ fn respond(
     stream.flush()
 }
 
+/// The server binds loopback, but a name that *resolves* to loopback is enough
+/// for a page on the internet to talk to it (DNS rebinding), and this one hands
+/// out the user's spend. Only the names a local browser would actually send are
+/// answered.
+fn host_is_loopback(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        // An IPv6 literal is bracketed, so the colons inside it are not a port.
+        Some(rest) => rest.split_once(']').map_or(rest, |(name, _)| name),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1")
+}
+
 fn open_in_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -475,7 +584,10 @@ fn rfc3339(epoch_secs: u64) -> String {
 }
 
 fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // The URL-safe alphabet, and not merely as a nicety: the payload rides in a
+    // fragment the page reads with `URLSearchParams`, which decodes `+` as a
+    // space and would quietly corrupt every link containing one.
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let mut buffer = [0u8; 3];
@@ -536,6 +648,35 @@ mod tests {
         );
     }
 
+    /// A target the price map cannot resolve drops out of the table without a
+    /// word, so the provider just looks like one nobody can be compared to.
+    #[test]
+    fn every_comparison_target_has_a_published_price_and_a_source() {
+        let published = public_data(&pricing());
+        let (_, bytes, _) = published
+            .iter()
+            .find(|(name, _, _)| name == "pricing.json")
+            .expect("pricing.json is published");
+        let value: Value = serde_json::from_slice(bytes).expect("valid JSON");
+        let models = value["models"].as_object().expect("a model table");
+
+        for tier in EquivalenceMap::embedded().tiers {
+            for target in tier.models.values() {
+                let row = models
+                    .get(target)
+                    .unwrap_or_else(|| panic!("{target} has no published price"));
+                assert!(
+                    row["source"]
+                        .as_str()
+                        .is_some_and(|url| url.starts_with("https://")),
+                    "{target} has no source link"
+                );
+                assert!(row["input"].as_f64().is_some_and(|rate| rate > 0.0));
+                assert!(row["output"].as_f64().is_some_and(|rate| rate > 0.0));
+            }
+        }
+    }
+
     /// Everything this function returns is uploaded under the world-readable
     /// prefix, so a machine id or a total reaching it would be a leak.
     #[test]
@@ -556,13 +697,30 @@ mod tests {
         let keys = KeySpace::new("ccusage/v1").expect("key space");
         let hmac = HmacKey::new("GOOG1EXAMPLE", "c2VjcmV0");
 
-        let link = share_link("my-bucket", &keys, &hmac, 3600).expect("a link");
+        let link = share_link("my-bucket", &assets_bucket("my-bucket"), &keys, &hmac, 3600)
+            .expect("a link");
 
         let (base, fragment) = link.split_once('#').expect("a fragment");
         assert!(!base.contains('?'), "the page URL carries no query string");
         let encoded = fragment.strip_prefix("s=").expect("the sources parameter");
         assert!(!encoded.is_empty());
         assert!(base.ends_with("/dashboard/index.html"));
+        assert!(base.contains("/my-bucket-dashboard/"), "{base}");
+    }
+
+    /// The page is world-readable and the data is not, which on GCS can only be
+    /// two buckets: a condition on an `allUsers` binding is rejected outright.
+    #[test]
+    fn the_page_is_served_from_a_different_bucket_than_the_data() {
+        let assets = assets_bucket("my-bucket");
+
+        assert_ne!(assets, "my-bucket");
+        assert!(assets.starts_with("my-bucket"), "{assets}");
+        assert!(assets.len() <= 63, "bucket names cap at 63 characters");
+
+        let long = assets_bucket(&"a".repeat(63));
+        assert_eq!(long.len(), 63, "{long}");
+        assert!(long.ends_with("-dashboard"), "{long}");
     }
 
     #[test]
@@ -584,5 +742,162 @@ mod tests {
         assert_eq!(base64url(b"ab"), "YWI=");
         assert_eq!(base64url(b"abc"), "YWJj");
         assert_eq!(base64url(br#"{"a":1}"#), "eyJhIjoxfQ==");
+    }
+
+    /// `URLSearchParams` reads `+` as a space, so a payload encoded with the
+    /// standard alphabet decodes to rubbish for the links unlucky enough to
+    /// contain one.
+    #[test]
+    fn the_fragment_payload_uses_url_safe_characters_only() {
+        let awkward: Vec<u8> = (0u8..=255).collect();
+
+        let encoded = base64url(&awkward);
+
+        assert!(
+            encoded
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || matches!(character, '-' | '_' | '=')),
+            "{encoded}"
+        );
+    }
+
+    /// Drives `respond` over a real socket: the header parsing, the Host
+    /// check and the framing are the parts a browser meets first, and a test
+    /// that called the helpers directly would skip all three.
+    fn request(line: &str, host: Option<&str>) -> String {
+        use std::io::Read as _;
+
+        let listener =
+            TcpListener::bind(SocketAddr::from((LOCAL_HOST, 0))).expect("a loopback port");
+        let port = listener.local_addr().expect("an address").port();
+        let request = match host {
+            Some(host) => format!("{line} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+            None => format!("{line} HTTP/1.1\r\n\r\n"),
+        };
+        let client = std::thread::spawn(move || {
+            let mut stream =
+                TcpStream::connect(SocketAddr::from((LOCAL_HOST, port))).expect("a connection");
+            stream.write_all(request.as_bytes()).expect("a request");
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).expect("a response");
+            String::from_utf8_lossy(&response).into_owned()
+        });
+
+        let (stream, _) = listener.accept().expect("a connection");
+        let data = vec![(
+            "data/daily.json".to_string(),
+            br#"{"schema":1,"days":{}}"#.to_vec(),
+        )];
+        let public = vec![(
+            "pricing.json".to_string(),
+            br#"{"models":{}}"#.to_vec(),
+            "application/json",
+        )];
+        respond(stream, &data, &public).expect("a served response");
+        client.join().expect("the client thread")
+    }
+
+    #[test]
+    fn a_bare_request_is_answered_with_the_page_and_no_store() {
+        let response = request("GET /", Some("127.0.0.1:8787"));
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.contains("Content-Type: text/html"), "{response}");
+        assert!(response.contains("Cache-Control: no-store"), "{response}");
+        assert!(
+            response.contains("X-Content-Type-Options: nosniff"),
+            "{response}"
+        );
+        // Byte-identical to the file the HTML linter checks, so linting the
+        // source lints what a browser is actually handed.
+        let page = std::str::from_utf8(ASSETS[0].bytes).expect("UTF-8");
+        assert!(response.ends_with(page), "{response}");
+    }
+
+    #[test]
+    fn the_rollups_and_the_price_table_are_served_alongside_the_page() {
+        let rollup = request("GET /data/daily.json", Some("localhost:8787"));
+        let prices = request("GET /pricing.json?v=2", Some("localhost:8787"));
+
+        assert!(rollup.contains("application/json"), "{rollup}");
+        assert!(rollup.ends_with(r#"{"schema":1,"days":{}}"#), "{rollup}");
+        assert!(prices.ends_with(r#"{"models":{}}"#), "{prices}");
+    }
+
+    #[test]
+    fn an_unknown_path_is_a_404_rather_than_the_page() {
+        let response = request("GET /../etc/passwd", Some("localhost"));
+
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        assert!(response.ends_with("not found"), "{response}");
+    }
+
+    /// A page on the internet can point a name it owns at 127.0.0.1 and then
+    /// read whatever answers, which here is the user's spend.
+    #[test]
+    fn a_request_addressed_to_someone_elses_name_is_refused() {
+        let rebound = request("GET /data/daily.json", Some("spend.attacker.example:8787"));
+        let anonymous = request("GET /", None);
+
+        assert!(rebound.starts_with("HTTP/1.1 403 Forbidden"), "{rebound}");
+        assert!(!rebound.contains("schema"), "{rebound}");
+        assert!(
+            anonymous.starts_with("HTTP/1.1 403 Forbidden"),
+            "{anonymous}"
+        );
+    }
+
+    #[test]
+    fn the_local_server_binds_loopback_only() {
+        let listener = bind_local().expect("a listener");
+
+        let address = listener.local_addr().expect("an address");
+
+        assert!(address.ip().is_loopback(), "{address}");
+        assert!(
+            (FIRST_PORT..=LAST_PORT).contains(&address.port()) || address.port() > 0,
+            "{address}"
+        );
+    }
+
+    #[test]
+    fn a_link_lifetime_is_described_in_the_largest_unit_that_fits() {
+        assert_eq!(human_ttl(600), "10 minute(s)");
+        assert_eq!(human_ttl(7_200), "2 hour(s)");
+        assert_eq!(human_ttl(172_800), "2 day(s)");
+    }
+
+    #[test]
+    fn the_published_page_url_points_at_the_public_prefix() {
+        let keys = KeySpace::new("ccusage/v1").expect("key space");
+
+        let url = public_url("my-bucket-dashboard", &keys);
+
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/my-bucket-dashboard/ccusage/v1/dashboard/index.html"
+        );
+    }
+
+    /// V4 signing wants a basic-format timestamp, and a signature built from a
+    /// stamp the server reads differently fails with an opaque 403.
+    #[test]
+    fn the_signing_timestamp_drops_its_separators_and_its_milliseconds() {
+        assert_eq!(rfc3339(1_767_225_600), "2026-01-01T00:00:00Z");
+        assert_eq!(basic_timestamp(1_767_225_600), "20260101T000000Z");
+        assert!(now_secs() > 1_700_000_000);
+    }
+
+    #[test]
+    fn only_loopback_host_names_are_answered() {
+        assert!(host_is_loopback("127.0.0.1:8787"));
+        assert!(host_is_loopback("localhost:8787"));
+        assert!(host_is_loopback("[::1]:8787"));
+        assert!(host_is_loopback("localhost"));
+
+        assert!(!host_is_loopback(""), "a request without a Host header");
+        assert!(!host_is_loopback("spend.attacker.example:8787"));
+        assert!(!host_is_loopback("127.0.0.1.attacker.example"));
     }
 }

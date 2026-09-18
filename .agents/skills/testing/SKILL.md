@@ -23,7 +23,19 @@ large module is split, its tests move with the code instead of staying in `main.
 
 Read `references/rust.md` for fixtures, snapshots, pricing, and model names.
 
+### Cloud sync coverage gate
+
+`just rust::coverage-sync` measures line coverage of the cloud-sync, comparison and
+dashboard code (`ccusage-sync`, `ccusage-objectstore`, `ccusage-compare`,
+`ccusage-dashboard`, and `ccusage/src/{sync*,gcs,credentials.rs,compare.rs}`) and fails
+below 85%. It needs `cargo-llvm-cov` and the `llvm-tools-preview` component, so it is not
+part of `just test`; run it when changing those files.
+
 ## Node
 
 Read `references/node-test.md`. Node covers only the package launcher and the Nix-side
 JS tooling; production CLI runtime behavior is tested in Rust.
+
+`rust/crates/ccusage-dashboard/dashboard-html.test.ts` is the exception: it lints the
+dashboard HTML the binary embeds with `html-validate`, discovering the file list from
+`src/lib.rs` so a newly embedded page cannot skip the linter.

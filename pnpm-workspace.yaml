@@ -39,3 +39,6 @@ allowBuilds:
   workerd: true
 
 shellEmulator: true
+
+catalog:
+  html-validate: 11.15.0

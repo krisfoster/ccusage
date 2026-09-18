@@ -1,10 +1,11 @@
 //! The double has to be trustworthy before anything is tested against it, so its CAS and fault
 //! behavior is pinned here.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ccusage_objectstore::{Key, KeySpace, ObjectStore, ObjectStoreError, Precondition, RollupKind};
-use ccusage_test_support::objectstore::{Fault, MemoryStore};
+use ccusage_test_support::objectstore::{Fault, MemoryStore, Op, When};
 
 fn manifest() -> Key {
     KeySpace::new("ccusage/v1").unwrap().manifest()
@@ -191,4 +192,105 @@ fn delays_each_operation_by_the_configured_latency() {
     store.get(&manifest()).unwrap();
     store.get(&manifest()).unwrap();
     assert!(started.elapsed() >= Duration::from_millis(40));
+}
+
+#[test]
+fn a_keyed_fault_spares_every_other_object() {
+    let store = MemoryStore::new();
+    let keys = KeySpace::new("ccusage/v1").unwrap();
+    store.fail_on(When::put("daily.json"), Fault::Network);
+
+    let other = store.put(
+        &keys.manifest(),
+        b"{}",
+        "application/json",
+        &Precondition::None,
+    );
+    let daily = store.put(
+        &keys.rollup(RollupKind::Daily),
+        b"{}",
+        "application/json",
+        &Precondition::None,
+    );
+
+    assert!(other.is_ok());
+    assert!(matches!(daily, Err(ObjectStoreError::Network { .. })));
+}
+
+#[test]
+fn skip_lets_the_first_writes_through_and_fails_the_one_named() {
+    let store = MemoryStore::new();
+    let keys = KeySpace::new("ccusage/v1").unwrap();
+    store.fail_on(When::put("").skip(2), Fault::Server { status: 503 });
+
+    let results: Vec<_> = (0..4)
+        .map(|n| {
+            let key = keys.rollup(if n % 2 == 0 {
+                RollupKind::Daily
+            } else {
+                RollupKind::Weekly
+            });
+            store
+                .put(&key, b"{}", "application/json", &Precondition::None)
+                .is_ok()
+        })
+        .collect();
+
+    assert_eq!(results, vec![true, true, false, true]);
+}
+
+/// The case a naive retry turns into a duplicate: the object is written and
+/// the caller is told it was not.
+#[test]
+fn a_lost_response_still_writes_the_object() {
+    let store = MemoryStore::new();
+    let key = manifest();
+    store.lose_response_on(When::put("manifest"), Fault::Network);
+
+    let result = store.put(&key, b"{\"v\":1}", "application/json", &Precondition::None);
+
+    assert!(matches!(result, Err(ObjectStoreError::Network { .. })));
+    assert_eq!(store.body(key.path()).as_deref(), Some(&b"{\"v\":1}"[..]));
+}
+
+/// The hook is the second process's turn, so it has to see the store as it is
+/// immediately before the first process's write.
+#[test]
+fn a_hook_runs_before_the_request_it_is_attached_to() {
+    let store = Arc::new(MemoryStore::new());
+    let key = manifest();
+    let observer = Arc::clone(&store);
+    let seen = Arc::new(Mutex::new(None));
+    let record = Arc::clone(&seen);
+    store.before(When::put("manifest").skip(1), move || {
+        *record.lock().unwrap() = observer.body(manifest().path());
+    });
+
+    store
+        .put(&key, b"first", "application/json", &Precondition::None)
+        .unwrap();
+    store
+        .put(&key, b"second", "application/json", &Precondition::None)
+        .unwrap();
+
+    assert_eq!(seen.lock().unwrap().as_deref(), Some(&b"first"[..]));
+    assert_eq!(store.body(key.path()).as_deref(), Some(&b"second"[..]));
+}
+
+#[test]
+fn counts_requests_per_operation_and_key() {
+    let store = MemoryStore::new();
+    let key = manifest();
+    store
+        .put(&key, b"{}", "application/json", &Precondition::None)
+        .unwrap();
+    store.get(&key).unwrap();
+    store.get(&key).unwrap();
+
+    assert_eq!(store.op_count(Op::Get, "manifest"), 2);
+    assert_eq!(store.op_count(Op::Put, "manifest"), 1);
+    assert_eq!(store.op_count(Op::Get, "shards"), 0);
+
+    store.reset_counts();
+    assert_eq!(store.op_count(Op::Get, "manifest"), 0);
 }

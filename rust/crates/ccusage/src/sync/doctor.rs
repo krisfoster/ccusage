@@ -100,7 +100,7 @@ pub(crate) fn privacy_check(uniform_bucket_level_access: bool, policy: &Value) -
         None => Check::new(
             "bucket privacy",
             Outcome::Pass,
-            "only the dashboard prefix is world-readable",
+            "nothing in this bucket is world-readable",
         ),
     }
 }

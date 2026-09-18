@@ -10,13 +10,14 @@
  */
 
 const ROLLUP_SCHEMA = 1;
-const BUCKETS_PER_DAY = 96;
 const BUCKET_MS = 15 * 60 * 1000;
 
 const state = {
 	timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
 	data: null,
 };
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 function el(tag, attrs = {}, children = []) {
 	const node = document.createElement(tag);
@@ -31,8 +32,30 @@ function el(tag, attrs = {}, children = []) {
 	return node;
 }
 
+function svg(tag, attrs = {}, children = []) {
+	const node = document.createElementNS(SVG_NS, tag);
+	for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+	for (const child of [].concat(children)) {
+		node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+	}
+	return node;
+}
+
 const money = (value) =>
 	value >= 1000 ? `$${value.toFixed(0)}` : `$${value.toFixed(2)}`;
+
+/** Axis labels need more precision than totals: a $0.004 day is not $0.00. */
+const axisMoney = (value) => {
+	if (value === 0) return '$0';
+	if (value >= 1000) return `$${Math.round(value).toLocaleString()}`;
+	if (value >= 10) return `$${value.toFixed(0)}`;
+	if (value >= 1) return `$${value.toFixed(1)}`;
+	if (value >= 0.01) return `$${value.toFixed(2)}`;
+	return `$${value.toPrecision(1)}`;
+};
+
+const perMillion = (value) =>
+	value == null ? '—' : value >= 100 ? `$${value.toFixed(0)}` : `$${value.toFixed(2)}`;
 
 const tokens = (value) => {
 	if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
@@ -185,33 +208,146 @@ function counterfactuals(modelTotals, equivalence, pricing) {
 				excluded += totals.cost;
 				continue;
 			}
-			const perMillion = (count, rate) => (count / 1e6) * rate;
+			const atRate = (count, rate) => (count / 1e6) * rate;
 			const cacheWrite = rates.cacheWrite ?? rates.input;
 			const cacheRead = rates.cacheRead ?? rates.input;
 			if (rates.cacheWrite == null && totals.cacheWriteTokens > 0) inferredCache = true;
 			actual += totals.cost;
 			projected +=
-				perMillion(totals.inputTokens, rates.input) +
-				perMillion(totals.outputTokens, rates.output) +
-				perMillion(totals.cacheWriteTokens, cacheWrite) +
-				perMillion(totals.cacheReadTokens, cacheRead);
+				atRate(totals.inputTokens, rates.input) +
+				atRate(totals.outputTokens, rates.output) +
+				atRate(totals.cacheWriteTokens, cacheWrite) +
+				atRate(totals.cacheReadTokens, cacheRead);
 		}
 		if (actual === 0 && projected === 0) continue;
-		rows.push({
-			provider: provider.label,
-			actual,
-			projected,
-			saving: actual - projected,
-			savingPercent: actual > 0 ? ((actual - projected) / actual) * 100 : 0,
-			excluded,
-			inferredCache,
-		});
+		rows.push({ provider: provider.label, actual, projected, excluded, inferredCache });
 	}
-	return rows.sort((left, right) => right.saving - left.saving);
+	return rows.sort((left, right) => left.projected - right.projected);
+}
+
+/**
+ * The published price list, as rates rather than as a verdict.
+ *
+ * Every row links to where its provider publishes the rate: the numbers come
+ * from a third-party snapshot, and a price nobody can check is a price nobody
+ * should trust.
+ */
+function priceRows(pricing) {
+	return Object.entries(pricing?.models || {})
+		.sort((left, right) => left[0].localeCompare(right[0]))
+		.map(([model, rates]) => [
+			{
+				sort: model,
+				node: rates.source
+					? el('a', { href: rates.source, target: '_blank', rel: 'noopener noreferrer' }, model)
+					: el('span', {}, model),
+			},
+			{ sort: rates.provider || '—' },
+			{ sort: rates.tier || '—' },
+			{ sort: rates.input ?? null, label: perMillion(rates.input) },
+			{ sort: rates.output ?? null, label: perMillion(rates.output) },
+			{ sort: rates.cacheWrite ?? null, label: perMillion(rates.cacheWrite) },
+			{ sort: rates.cacheRead ?? null, label: perMillion(rates.cacheRead) },
+		]);
 }
 
 /* --------------------------------------------------------------- rendering */
 
+/**
+ * A table the reader can reorder.
+ *
+ * Rows carry a `sort` value per column so a price sorts by its number and not
+ * by the string `"$10.00" < "$9.00"`. The sort is stable — rows tied on the
+ * chosen column keep the order the caller gave them — and re-clicking a column
+ * reverses it. A cell with no value sorts last whichever way the column runs,
+ * since "unpublished" is not a price and does not belong at the top.
+ *
+ * Sorting rebuilds the header row, which drops focus to the body; the new
+ * header is refocused so a keyboard reader can press Enter twice to reverse a
+ * column rather than having to tab back to it.
+ */
+function sortableTable(headers, rows) {
+	const state = { column: null, descending: true };
+	const container = el('div', { class: 'table-scroll sortable' });
+
+	const render = (focusColumn) => {
+		let ordered = rows;
+		if (state.column != null) {
+			const direction = state.descending ? -1 : 1;
+			ordered = rows
+				.map((row, index) => ({ row, index }))
+				.sort((left, right) => {
+					const a = left.row[state.column].sort;
+					const b = right.row[state.column].sort;
+					if (a == null || b == null) {
+						if (a == null && b == null) return left.index - right.index;
+						return a == null ? 1 : -1;
+					}
+					const compared =
+						typeof a === 'number' && typeof b === 'number'
+							? a - b
+							: String(a).localeCompare(String(b));
+					return compared !== 0 ? compared * direction : left.index - right.index;
+				})
+				.map(({ row }) => row);
+		}
+
+		const head = el(
+			'tr',
+			{},
+			headers.map((header, column) => {
+				const sorted = state.column === column;
+				const cell = el(
+					'th',
+					{
+						class: `sortable-th${sorted ? ' sorted' : ''}`,
+						role: 'button',
+						tabindex: '0',
+						'aria-sort': sorted ? (state.descending ? 'descending' : 'ascending') : 'none',
+					},
+					`${header}${sorted ? (state.descending ? ' ▼' : ' ▲') : ''}`,
+				);
+				const toggle = () => {
+					state.descending = state.column === column ? !state.descending : true;
+					state.column = column;
+					render(column);
+				};
+				cell.addEventListener('click', toggle);
+				cell.addEventListener('keydown', (event) => {
+					if (event.key === 'Enter' || event.key === ' ') {
+						event.preventDefault();
+						toggle();
+					}
+				});
+				return cell;
+			}),
+		);
+		const body = el(
+			'tbody',
+			{},
+			ordered.map((row) =>
+				el(
+					'tr',
+					{},
+					row.map((cell) => el('td', {}, cell.node ?? String(cell.label ?? cell.sort ?? '—'))),
+				),
+			),
+		);
+		container.replaceChildren(el('table', {}, [el('thead', {}, head), body]));
+		if (focusColumn != null) {
+			head.children[focusColumn]?.focus();
+		}
+	};
+
+	render();
+	return container;
+}
+
+/**
+ * A fixed table, wrapped so its own columns scroll instead of widening the
+ * page: the cells do not wrap, and a narrow phone would otherwise stretch
+ * every sibling — the chart included — to the widest row.
+ */
 function table(headers, rows) {
 	const head = el(
 		'thead',
@@ -233,7 +369,7 @@ function table(headers, rows) {
 			),
 		),
 	);
-	return el('table', {}, [head, body]);
+	return el('div', { class: 'table-scroll' }, el('table', {}, [head, body]));
 }
 
 function totalsTiles(totals, dayCount) {
@@ -249,15 +385,113 @@ function totalsTiles(totals, dayCount) {
 	);
 }
 
-function series(days) {
-	const peak = Math.max(...days.map((day) => day.totals.cost), 0.0001);
-	return days.map((day) =>
-		el('div', {
-			class: 'bar-col',
-			title: `${day.date} — ${money(day.totals.cost)}`,
-			style: `height:${Math.max(2, (day.totals.cost / peak) * 100)}%`,
+/**
+ * A "nice" axis top: the smallest 1/2/5 × 10ⁿ at or above the peak, so the
+ * labels read $2 / $4 / $6 rather than $1.87 / $3.74.
+ */
+function axisTop(peak) {
+	if (!(peak > 0)) return 1;
+	const magnitude = 10 ** Math.floor(Math.log10(peak));
+	const step = [1, 2, 2.5, 5, 10].find((factor) => peak <= factor * magnitude) ?? 10;
+	return step * magnitude;
+}
+
+const CHART = { minWidth: 280, height: 220, left: 56, right: 8, top: 10, bottom: 28 };
+
+/**
+ * The daily chart, drawn as SVG with both axes.
+ *
+ * A bar chart without a scale invites the reader to guess it, and every guess
+ * is wrong by whatever the peak happens to be. The viewBox is measured in CSS
+ * pixels of the space the chart actually has, so a phone gets a shorter chart
+ * rather than the same chart shrunk until its labels are unreadable.
+ */
+function series(days, width) {
+	const { height, left, right, top, bottom } = CHART;
+	const plotWidth = width - left - right;
+	const plotHeight = height - top - bottom;
+	const peak = Math.max(...days.map((day) => day.totals.cost), 0);
+	const ceiling = axisTop(peak);
+	const y = (cost) => top + plotHeight - (cost / ceiling) * plotHeight;
+
+	const ticks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => fraction * ceiling);
+	const gridlines = ticks.flatMap((tick) => [
+		svg('line', {
+			class: 'grid',
+			x1: left,
+			x2: width - right,
+			y1: y(tick).toFixed(1),
+			y2: y(tick).toFixed(1),
 		}),
+		svg(
+			'text',
+			{ class: 'tick y', x: left - 8, y: (y(tick) + 4).toFixed(1) },
+			axisMoney(tick),
+		),
+	]);
+
+	const slot = plotWidth / Math.max(days.length, 1);
+	const barWidth = Math.max(1, Math.min(28, slot * 0.7));
+	const bars = days.map((day, index) => {
+		const x = left + slot * (index + 0.5) - barWidth / 2;
+		const barTop = day.totals.cost > 0 ? Math.min(y(day.totals.cost), top + plotHeight - 1) : top + plotHeight;
+		return svg('rect', {
+			class: 'bar',
+			x: x.toFixed(1),
+			y: barTop.toFixed(1),
+			width: barWidth.toFixed(1),
+			height: Math.max(0, top + plotHeight - barTop).toFixed(1),
+			rx: Math.min(3, barWidth / 2).toFixed(1),
+		}, svg('title', {}, `${day.date} — ${money(day.totals.cost)}`));
+	});
+
+	// Roughly one label per 90px, so a year of days does not become a smear.
+	const every = Math.max(1, Math.ceil(days.length / Math.floor(plotWidth / 90)));
+	const dates = days
+		.map((day, index) => ({ day, index }))
+		.filter(({ index }) => index % every === 0 || index === days.length - 1)
+		.map(({ day, index }) =>
+			svg(
+				'text',
+				{ class: 'tick x', x: (left + slot * (index + 0.5)).toFixed(1), y: height - 8 },
+				day.date.slice(5),
+			),
+		);
+
+	const axes = [
+		svg('line', { class: 'axis', x1: left, x2: left, y1: top, y2: top + plotHeight }),
+		svg('line', {
+			class: 'axis',
+			x1: left,
+			x2: width - right,
+			y1: top + plotHeight,
+			y2: top + plotHeight,
+		}),
+	];
+
+	return svg(
+		'svg',
+		{
+			viewBox: `0 0 ${width} ${height}`,
+			role: 'img',
+			'aria-label': `Daily spend, ${days.length} day(s), peak ${money(peak)}`,
+		},
+		[...gridlines, ...bars, ...dates, ...axes],
 	);
+}
+
+let chartWidth = 0;
+
+/**
+ * Redraws the chart at the width its panel currently offers, in CSS pixels, so
+ * the drawing is never scaled and the tick text keeps the size it asks for.
+ */
+function drawSeries() {
+	const host = document.getElementById('series');
+	const width = Math.round(Math.max(CHART.minWidth, host.clientWidth || CHART.minWidth));
+	if (width === chartWidth && host.firstChild) return;
+	chartWidth = width;
+	host.replaceChildren(series(state.days, width));
 }
 
 function totalsRows(entries) {
@@ -297,8 +531,10 @@ function render() {
 	const cells = days.flatMap((day) => day.cells);
 	const totals = cells.reduce((accumulated, cell) => addCell(accumulated, cell), emptyTotals());
 
+	state.days = days;
 	document.getElementById('totals').replaceChildren(...totalsTiles(totals, days.length));
-	document.getElementById('series').replaceChildren(...series(days));
+	chartWidth = 0;
+	drawSeries();
 
 	const modelTotals = Object.fromEntries(groupBy(cells, (cell) => cell.m));
 	const columns = ['', 'Cost', 'Tokens', 'Messages'];
@@ -337,15 +573,31 @@ function render() {
 	const comparisons = counterfactuals(modelTotals, equivalence, pricing);
 	document.getElementById('compare').replaceChildren(
 		comparisons.length > 0
-			? table(
-					['Provider', 'Would have cost', 'Actual (comparable)', 'Saving', 'Saving %'],
+			? sortableTable(
+					['Provider', 'Would have cost', 'Actual (comparable)'],
 					comparisons.map((row) => [
-						row.provider,
-						money(row.projected),
-						money(row.actual),
-						el('span', { class: row.saving >= 0 ? 'saving' : '' }, money(row.saving)),
-						`${row.savingPercent.toFixed(1)}%`,
+						{ sort: row.provider },
+						{ sort: row.projected, label: money(row.projected) },
+						{ sort: row.actual, label: money(row.actual) },
 					]),
+				)
+			: el('p', { class: 'muted' }, 'No price data was published with this dashboard.'),
+	);
+
+	const prices = priceRows(pricing);
+	document.getElementById('prices').replaceChildren(
+		prices.length > 0
+			? sortableTable(
+					[
+						'Model',
+						'Provider',
+						'Tier',
+						'Input / M',
+						'Output / M',
+						'Cache write / M',
+						'Cache read / M',
+					],
+					prices,
 				)
 			: el('p', { class: 'muted' }, 'No price data was published with this dashboard.'),
 	);
@@ -382,6 +634,18 @@ function timezones() {
 
 async function main() {
 	timezones();
+	// The redraw changes the box being observed, which inside the callback is
+	// what raises "ResizeObserver loop completed with undelivered
+	// notifications"; deferring it to the next frame keeps the two apart.
+	let queued = false;
+	new ResizeObserver(() => {
+		if (!state.days || queued) return;
+		queued = true;
+		requestAnimationFrame(() => {
+			queued = false;
+			drawSeries();
+		});
+	}).observe(document.getElementById('series'));
 	try {
 		state.data = await load();
 		render();
@@ -390,4 +654,4 @@ async function main() {
 	}
 }
 
-main();
+void main();

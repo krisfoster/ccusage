@@ -7,31 +7,36 @@
 //! that gains a single entry rewrites only that day.
 
 use ccusage_config::ConfigContext;
-use ccusage_core::LoadedEntry;
 use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, UtcDate};
-use ccusage_sync::{FoldContext, FoldEntry, Salt, Shard, fold, is_finalized};
+use ccusage_sync::{FoldContext, Salt, Shard, fold, is_finalized};
 
 use super::machine::{self, IndexEntry, MachineIndex};
 use super::now_ms;
 use crate::{
     Result,
     cli::{SharedArgs, SyncRunArgs},
-    cli_error, format_rfc3339_millis, load_entries,
-    sync::{failures, maintenance, rollups},
+    cli_error, format_rfc3339_millis,
+    pricing::PricingMap,
+    sync::{bootstrap, failures, lock, maintenance, rollups, sources},
 };
-
-/// The agent this build syncs. Shards are keyed by agent, so adding another is
-/// a matter of folding its entries under a different name, not a layout change.
-const AGENT: &str = "claude";
 
 /// What a run did, in the terms the user is told about.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RunSummary {
     pub uploaded: Vec<String>,
     pub unchanged: usize,
+    /// The agents that had usage on this machine, so the user can see at a
+    /// glance that a tool they expected is missing.
+    pub agents: Vec<String>,
+    /// Agents whose logs could not be read, with the reason.
+    pub skipped: Vec<String>,
     /// Days that changed after they had settled. Reported because a reader may
     /// already have cached a total this run has just moved.
     pub late_edits: Vec<String>,
+    /// Days this machine has usage for but could not turn into a shard, with
+    /// the reason. Never silent: a day dropped here is usage the bucket will
+    /// not show.
+    pub unhashable: Vec<String>,
 }
 
 impl RunSummary {
@@ -47,11 +52,28 @@ impl RunSummary {
                 self.unchanged
             )
         };
+        if !self.agents.is_empty() {
+            text.push_str(&format!(" Agents: {}.", self.agents.join(", ")));
+        }
+        if !self.skipped.is_empty() {
+            text.push_str(&format!(
+                " Warning: {} agent(s) could not be read and were skipped: {}.",
+                self.skipped.len(),
+                self.skipped.join("; ")
+            ));
+        }
         if !self.late_edits.is_empty() {
             text.push_str(&format!(
                 " Warning: {} finalized day(s) changed and were rewritten: {}.",
                 self.late_edits.len(),
                 self.late_edits.join(", ")
+            ));
+        }
+        if !self.unhashable.is_empty() {
+            text.push_str(&format!(
+                " Warning: {} day(s) could not be prepared for upload and are missing from the bucket: {}.",
+                self.unhashable.len(),
+                self.unhashable.join("; ")
             ));
         }
         text
@@ -65,6 +87,40 @@ pub(crate) struct UploadPlan {
     pub unchanged: usize,
     /// Dates whose shard had been finalized and changed anyway.
     pub late_edits: Vec<String>,
+    /// Dates whose shard could not be hashed, with the reason. These are not
+    /// uploaded, and saying so is the point: dropping them quietly would
+    /// report "nothing to sync" for usage that never arrived.
+    pub unhashable: Vec<String>,
+}
+
+impl UploadPlan {
+    /// Folds another agent's plan into this one.
+    ///
+    /// A date is reported once however many agents touched it: the user is
+    /// told which days moved, and "2026-09-17" three times says nothing more
+    /// than once does.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.uploads.extend(other.uploads);
+        self.unchanged += other.unchanged;
+        self.unhashable.extend(other.unhashable);
+        for date in other.late_edits {
+            if !self.late_edits.contains(&date) {
+                self.late_edits.push(date);
+            }
+        }
+    }
+
+    /// The dates this plan would upload, each named once and in order.
+    pub(crate) fn dates(&self) -> Vec<String> {
+        let mut dates: Vec<String> = self
+            .uploads
+            .iter()
+            .map(|shard| shard.utc_date.clone())
+            .collect();
+        dates.sort_unstable();
+        dates.dedup();
+        dates
+    }
 }
 
 /// Splits folded shards into the ones the bucket needs and the ones it has.
@@ -78,8 +134,13 @@ pub(crate) struct UploadPlan {
 pub(crate) fn plan_uploads(shards: Vec<Shard>, index: &MachineIndex, agent: &str) -> UploadPlan {
     let mut plan = UploadPlan::default();
     for mut shard in shards {
-        let Ok(hash) = shard.finish().map(str::to_string) else {
-            continue;
+        let hash = match shard.finish().map(str::to_string) {
+            Ok(hash) => hash,
+            Err(error) => {
+                plan.unhashable
+                    .push(format!("{} {} ({error})", agent, shard.utc_date));
+                continue;
+            }
         };
         if index.is_current(agent, &shard.utc_date, &hash) {
             plan.unchanged += 1;
@@ -172,26 +233,6 @@ pub(crate) fn parse_date(utc_date: &str) -> std::result::Result<UtcDate, String>
     UtcDate::new(year, month, day).map_err(|error| error.to_string())
 }
 
-/// Entries as the adapters produce them, reduced to what a shard may hold.
-fn to_fold_entries(entries: &[LoadedEntry]) -> Vec<FoldEntry> {
-    entries
-        .iter()
-        .map(|entry| FoldEntry {
-            timestamp_ms: entry.timestamp.as_millis(),
-            model: entry.model.clone().unwrap_or_else(|| "unknown".to_string()),
-            input_tokens: entry.data.message.usage.input_tokens,
-            output_tokens: entry.data.message.usage.output_tokens,
-            cache_write_tokens: entry.data.message.usage.cache_creation_input_tokens,
-            cache_read_tokens: entry.data.message.usage.cache_read_input_tokens,
-            cost: entry.cost,
-            session_id: entry.session_id.to_string(),
-            project_path: entry.project_path.to_string(),
-            message_id: entry.data.message.id.clone(),
-            request_id: entry.data.request_id.clone(),
-        })
-        .collect()
-}
-
 pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> {
     let salt = configured_salt(config)?;
     let super::Session {
@@ -203,27 +244,41 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
 
     // Before anything is folded: a clock hours out files usage under the
     // wrong dates, and no later step can tell that it did.
-    failures::check_clock(bucket_time_ms(&store, &keys), now_ms()).map_err(cli_error)?;
+    failures::check_clock(server_time_ms(&store, &keys, &machine_id), now_ms())
+        .map_err(cli_error)?;
 
-    let entries = load_entries(&SharedArgs::with_defaults(), None)?;
-    let context = FoldContext {
-        agent: AGENT,
-        machine_id: &machine_id,
-        user_id: &user_id,
-        ccusage_version: env!("CARGO_PKG_VERSION"),
-        cost_mode: "auto",
-        pricing_snapshot: concat!("embedded@", env!("CARGO_PKG_VERSION")),
-        generated_at: &iso_now(),
-        salt: &salt,
-        redact_projects: config
-            .sync()
-            .and_then(|sync| sync.redact_projects)
-            .unwrap_or(true),
-    };
-    let shards = fold(&to_fold_entries(&entries), &context);
+    let shared = SharedArgs::with_defaults();
+    let pricing =
+        PricingMap::load_with_overrides(shared.offline, false, shared.pricing_overrides.iter());
+    let loaded = sources::load_all(&shared, &pricing);
+    let redact_projects = config
+        .sync()
+        .and_then(|sync| sync.redact_projects)
+        .unwrap_or(true);
+    let generated_at = iso_now();
 
     let index = machine::load_index(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
-    let plan = plan_uploads(shards, &index, AGENT);
+    let mut plan = UploadPlan::default();
+    for agent in &loaded.agents {
+        let context = FoldContext {
+            agent: agent.agent,
+            machine_id: &machine_id,
+            user_id: &user_id,
+            ccusage_version: env!("CARGO_PKG_VERSION"),
+            cost_mode: "auto",
+            pricing_snapshot: concat!("embedded@", env!("CARGO_PKG_VERSION")),
+            generated_at: &generated_at,
+            salt: &salt,
+            redact_projects,
+        };
+        plan.absorb(plan_uploads(
+            fold(&agent.entries, &context),
+            &index,
+            agent.agent,
+        ));
+    }
+    let agents: Vec<String> = loaded.named().iter().map(|name| name.to_string()).collect();
+    let skipped = skipped(&loaded);
 
     let summary = if args.dry_run {
         if let Some(keep_days) = args.prune {
@@ -232,62 +287,125 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             println!("{}", pruned.to_text());
         }
         RunSummary {
-            uploaded: plan
-                .uploads
-                .iter()
-                .map(|shard| shard.utc_date.clone())
-                .collect(),
+            uploaded: plan.dates(),
             unchanged: plan.unchanged,
+            agents,
+            skipped,
             late_edits: plan.late_edits,
+            unhashable: plan.unhashable,
         }
     } else {
+        // Two syncs on one machine are never wanted, only ever an overlapping
+        // cron job or a second terminal. Held until this branch returns, so an
+        // error path releases it too. A dry run takes no lock: it writes
+        // nothing, and refusing to answer "what would this do" while a sync
+        // runs would be unhelpful.
+        let _lock = lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?;
         let now = iso_now();
-        let uploaded = upload(
+        let written = commit(
             &store,
             &keys,
             &user_id,
             &machine_id,
-            &plan.uploads,
+            &plan,
+            args.prune,
             &now,
             now_ms(),
         )
         .map_err(cli_error)?;
-        machine::update_machine(&store, &keys, &user_id, &machine_id, |record| {
-            record.last_sync_at = Some(now.clone());
-        })
-        .map_err(cli_error)?;
-        // Before the rollups, so one pass both removes the old days and
-        // rewrites the totals that mentioned them.
-        if let Some(keep_days) = args.prune {
-            let pruned = maintenance::prune(&store, &keys, &user_id, keep_days, now_ms(), false)
-                .map_err(cli_error)?;
-            println!("{}", pruned.to_text());
+        for line in written.notes {
+            println!("{line}");
         }
-        // Always, not only when this machine uploaded: another machine may have
-        // uploaded since the last pass, and the rollups are what the dashboard
-        // reads.
-        let rollup = rollups::refresh(&store, &keys, &user_id, &now).map_err(cli_error)?;
-        println!("{}", rollup.to_text());
         RunSummary {
-            uploaded,
+            uploaded: plan.dates(),
             unchanged: plan.unchanged,
+            agents,
+            skipped,
             late_edits: plan.late_edits,
+            unhashable: plan.unhashable,
         }
     };
     println!("{}", summary.to_text(args.dry_run));
     Ok(())
 }
 
-/// When the bucket's own clock last touched the manifest, as the reference
-/// for this machine's clock. A bucket nobody has written yet has nothing to
-/// compare against, and neither does a store that reports no times.
-fn bucket_time_ms(store: &dyn ObjectStore, keys: &KeySpace) -> Option<i64> {
-    let key = keys.manifest();
-    store
-        .get(&key)
-        .ok()
-        .flatten()
-        .and_then(|(_, meta)| meta.updated_ms)
+/// What the writing half of a run did, beyond the plan it was given.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Commit {
+    /// Dates whose shard objects were written.
+    pub written: Vec<String>,
+    /// Lines to print: the prune and rollup summaries, in the order they ran.
+    pub notes: Vec<String>,
+}
+
+/// Every write a run makes, in the one order that keeps a half-finished run
+/// safe: register, shards, index, machine record, prune, rollups.
+///
+/// Separate from `execute` so the ordering can be tested against a store that
+/// fails at a chosen step. `execute` itself needs a config, a credential and
+/// this machine's logs, none of which say anything about merge safety.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    machine_id: &str,
+    plan: &UploadPlan,
+    prune_keep_days: Option<u32>,
+    now: &str,
+    now_ms: i64,
+) -> std::result::Result<Commit, String> {
+    // Setup put this machine on the roster, but a `sync forget` elsewhere (or
+    // a manifest restored from before this machine existed) would take it off,
+    // and the rollups only read machines the roster names. Without this, such
+    // a machine would upload shards nothing ever counts.
+    bootstrap::register_machine(store, keys, user_id, machine_id)?;
+    let written = upload(store, keys, user_id, machine_id, &plan.uploads, now, now_ms)?;
+    machine::update_machine(store, keys, user_id, machine_id, |record| {
+        record.last_sync_at = Some(now.to_string());
+    })?;
+
+    let mut notes = Vec::new();
+    // Before the rollups, so one pass both removes the old days and rewrites
+    // the totals that mentioned them.
+    if let Some(keep_days) = prune_keep_days {
+        notes.push(maintenance::prune(store, keys, user_id, keep_days, now_ms, false)?.to_text());
+    }
+    // Always, not only when this machine uploaded: another machine may have
+    // uploaded since the last pass, and the rollups are what the dashboard
+    // reads.
+    notes.push(rollups::refresh(store, keys, user_id, now)?.to_text());
+    Ok(Commit { written, notes })
+}
+
+/// Agents that failed to load, named with the reason so the user can tell a
+/// tool they never installed from a log this build could not parse.
+fn skipped(loaded: &sources::Sources) -> Vec<String> {
+    loaded
+        .failures
+        .iter()
+        .map(|failure| format!("{} ({})", failure.agent, failure.detail))
+        .collect()
+}
+
+/// The bucket's clock right now, read by writing a probe object and taking the
+/// time the store stamped on it.
+///
+/// It has to be a fresh write. An existing object's timestamp says when that
+/// object was last written, so the manifest — written once, at setup — would
+/// make every sync on a bucket older than the skew threshold look like a
+/// machine whose clock is days fast.
+///
+/// A store that refuses the probe or reports no times leaves the clock
+/// unchecked rather than stopping the sync: the checks that follow will fail
+/// on their own if the bucket is genuinely unwritable.
+fn server_time_ms(store: &dyn ObjectStore, keys: &KeySpace, machine_id: &str) -> Option<i64> {
+    let key = keys.probe(machine_id).ok()?;
+    let meta = store
+        .put(&key, b"{}", "application/json", &Precondition::None)
+        .ok()?;
+    let _ = store.delete(&key, &Precondition::None);
+    meta.updated_ms
 }
 
 /// Without the bucket's salt this machine's hashes would not intersect anyone
@@ -317,6 +435,9 @@ mod tests {
 
     use super::*;
 
+    /// The agent the fixtures fold under. Shards are keyed by agent, and the
+    /// rules under test do not vary by which one.
+    const AGENT: &str = "claude";
     const USER: &str = "user-1";
     const MACHINE: &str = "machine-1";
     const NOW: &str = "2026-09-17T18:12:03Z";
@@ -356,6 +477,28 @@ mod tests {
             }],
             &context,
         )
+    }
+
+    /// A day that cannot be hashed cannot be uploaded, but dropping it in
+    /// silence would print "nothing to sync" over missing usage — the one
+    /// failure mode a user has no way to notice.
+    #[test]
+    fn a_day_that_cannot_be_hashed_is_named_rather_than_dropped() {
+        let salt = salt();
+        let mut broken = shards(&salt, 10);
+        broken[0].cells[0].model = String::new();
+
+        let plan = plan_uploads(broken, &MachineIndex::default(), AGENT);
+
+        assert!(plan.uploads.is_empty());
+        assert_eq!(plan.unchanged, 0);
+        assert_eq!(plan.unhashable.len(), 1);
+        assert!(plan.unhashable[0].contains("2026-09-17"), "{plan:?}");
+        let summary = RunSummary {
+            unhashable: plan.unhashable,
+            ..RunSummary::default()
+        };
+        assert!(summary.to_text(false).contains("missing from the bucket"));
     }
 
     #[test]
@@ -616,7 +759,10 @@ mod tests {
         let summary = RunSummary {
             uploaded: vec!["2026-09-17".to_string()],
             unchanged: 2,
+            agents: vec!["claude".to_string()],
+            skipped: Vec::new(),
             late_edits: Vec::new(),
+            unhashable: Vec::new(),
         };
 
         assert!(summary.to_text(true).starts_with("Would upload 1 day(s)"));
@@ -632,12 +778,56 @@ mod tests {
         let summary = RunSummary {
             uploaded: vec!["2026-09-10".to_string()],
             unchanged: 0,
+            agents: vec!["claude".to_string()],
+            skipped: Vec::new(),
             late_edits: vec!["2026-09-10".to_string()],
+            unhashable: Vec::new(),
         };
 
         let text = summary.to_text(false);
         assert!(text.contains("Warning"), "{text}");
         assert!(text.contains("2026-09-10"), "{text}");
+    }
+
+    /// The bucket's clock has to be read from a write made now. Taking it from
+    /// the manifest, which is written once at setup, made every sync on a
+    /// bucket older than an hour refuse as though the machine were days fast.
+    #[test]
+    fn the_clock_check_reads_the_bucket_now_rather_than_when_it_was_set_up() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        let manifest = store.seed(&keys.manifest(), b"{\"schema\":1}");
+        store.advance_clock_ms(7 * 24 * 60 * 60 * 1000);
+
+        let server_ms = server_time_ms(&store, &keys, MACHINE).expect("probe time");
+
+        assert!(
+            server_ms > manifest.updated_ms.expect("seeded time") + 6 * 24 * 60 * 60 * 1000,
+            "{server_ms} should be the bucket's clock now, not the manifest's"
+        );
+        assert!(failures::check_clock(Some(server_ms), store.now_ms()).is_ok());
+    }
+
+    #[test]
+    fn the_clock_probe_leaves_nothing_behind() {
+        let store = MemoryStore::new();
+        let keys = keys();
+
+        server_time_ms(&store, &keys, MACHINE).expect("probe time");
+
+        assert!(!store.contains(&keys.probe(MACHINE).expect("key")));
+    }
+
+    /// The probe is a diagnostic, not a gate: a store that will not take it
+    /// fails the writes that matter soon enough, with a better message.
+    #[test]
+    fn a_store_that_refuses_the_clock_probe_does_not_stop_the_sync() {
+        let store = MemoryStore::new();
+        let keys = keys();
+        store.fail_next(Fault::Network);
+
+        assert_eq!(server_time_ms(&store, &keys, MACHINE), None);
+        assert!(failures::check_clock(None, NOW_MS).is_ok());
     }
 
     #[test]

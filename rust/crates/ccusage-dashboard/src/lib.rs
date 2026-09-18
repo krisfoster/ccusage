@@ -77,6 +77,46 @@ mod tests {
         assert!(asset("../../etc/passwd").is_none());
     }
 
+    /// There is no bundler and no Node in this build, so nothing else would
+    /// notice the script asking for an element the page stopped containing:
+    /// the panel would simply render as an empty box.
+    #[test]
+    fn every_element_the_script_fills_exists_in_the_page() {
+        for id in ids_referenced_by(APP) {
+            assert!(
+                INDEX.contains(&format!("id=\"{id}\"")),
+                "app.js fills #{id}, which index.html does not contain"
+            );
+        }
+    }
+
+    /// The chart is drawn, not laid out by CSS, so the classes it hands to the
+    /// SVG are the only thing giving it axes, gridlines and bars.
+    #[test]
+    fn the_chart_classes_the_script_draws_are_styled() {
+        for class in ["bar", "grid", "axis", "tick"] {
+            assert!(
+                APP.contains(&format!("class: '{class}'"))
+                    || APP.contains(&format!("class: '{class} ")),
+                "the chart no longer draws .{class}"
+            );
+            assert!(
+                STYLES.contains(&format!(".series .{class}")),
+                ".series .{class} is drawn but not styled"
+            );
+        }
+    }
+
+    fn ids_referenced_by(script: &str) -> Vec<&str> {
+        script
+            .match_indices("getElementById('")
+            .filter_map(|(at, marker)| {
+                let rest = &script[at + marker.len()..];
+                rest.split_once('\'').map(|(id, _)| id)
+            })
+            .collect()
+    }
+
     /// Everything here becomes world-readable, so a reference to the user's
     /// bucket, machine or spend would be a leak the moment it is deployed.
     #[test]

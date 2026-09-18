@@ -8,11 +8,16 @@ pub(crate) mod bucket;
 pub(crate) mod dashboard;
 pub(crate) mod doctor;
 pub(crate) mod failures;
+pub(crate) mod lock;
 pub(crate) mod machine;
 pub(crate) mod maintenance;
+/// The merge matrices from `specs/sync-merge-test-plan.md`.
+#[cfg(test)]
+mod merge_matrix;
 pub(crate) mod project;
 pub(crate) mod rollups;
 pub(crate) mod run;
+pub(crate) mod sources;
 pub(crate) mod status;
 
 use std::{
@@ -37,7 +42,7 @@ use crate::{
     cli_error,
     gcs::{
         GcsStore, JsonApi, RetryPolicy,
-        bucket::{BucketAdmin, BucketSpec},
+        bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
         projects::ProjectCatalog,
     },
 };
@@ -252,8 +257,12 @@ fn setup_sync(
         ),
         &planned.name,
     );
-    let info = bucket::ensure_private(&admin, &BucketSpec::new(&project.id, location))
-        .map_err(|error| cli_error(error.to_string()))?;
+    // The data bucket never serves the dashboard — that lives in a separate
+    // bucket — so it can refuse to become public at all.
+    let mut spec = BucketSpec::new(&project.id, location);
+    spec.public_access_prevention = PublicAccessPrevention::Enforced;
+    let info =
+        bucket::ensure_private(&admin, &spec).map_err(|error| cli_error(error.to_string()))?;
     println!("Bucket gs://{} ready in {}.", info.name, info.location);
 
     let prefix = setup
@@ -329,4 +338,64 @@ fn setup_sync(
     println!("Saved sync settings to {}.", path.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ccusage_test_support::fs_fixture;
+
+    use super::*;
+
+    fn config_with(sync_block: &str) -> (ccusage_test_support::Fixture, ConfigContext) {
+        let fixture = fs_fixture!({
+            "ccusage.json": format!("{{\"sync\":{sync_block}}}"),
+        });
+        let args = vec![
+            "sync".to_string(),
+            "status".to_string(),
+            "--config".to_string(),
+            fixture.path("ccusage.json").to_string_lossy().into_owned(),
+        ];
+        let config = ConfigContext::from_args(&args);
+        (fixture, config)
+    }
+
+    #[test]
+    fn the_configured_auth_kind_decides_the_mode_and_absence_means_auto() {
+        let (_fixture, adc) = config_with(r#"{"auth":{"kind":"adc"}}"#);
+        let (_fixture, hmac) = config_with(r#"{"auth":{"kind":"hmac"}}"#);
+        let (_fixture, auto) = config_with(r#"{"auth":{"kind":"auto"}}"#);
+        let (_fixture, unset) = config_with("{}");
+
+        assert_eq!(config_auth_mode(&adc), SyncAuthMode::Adc);
+        assert_eq!(config_auth_mode(&hmac), SyncAuthMode::Hmac);
+        assert_eq!(config_auth_mode(&auto), SyncAuthMode::Auto);
+        assert_eq!(config_auth_mode(&unset), SyncAuthMode::Auto);
+    }
+
+    #[test]
+    fn the_clock_reads_forward_of_the_epoch() {
+        assert!(now_ms() > 1_700_000_000_000);
+    }
+
+    /// Status is offline by design, so both renderings have to work from the
+    /// config file alone.
+    #[test]
+    fn status_renders_from_the_config_file_in_both_shapes() {
+        let (_fixture, config) = config_with(r#"{"bucket":"ccusage-abc","prefix":"ccusage/v1"}"#);
+
+        show_status(&config, false).expect("the text rendering");
+        show_status(&config, true).expect("the JSON rendering");
+    }
+
+    /// Doctor talks to the bucket, so with no bucket configured it has to say
+    /// that rather than fail later on a credential it never needed.
+    #[test]
+    fn doctor_without_a_bucket_points_at_setup() {
+        let (_fixture, config) = config_with("{}");
+
+        let error = run_doctor(&config, false).expect_err("refused");
+
+        assert!(format!("{error}").contains("ccusage sync setup"), "{error}");
+    }
 }

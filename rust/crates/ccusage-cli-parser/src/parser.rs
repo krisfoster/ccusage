@@ -399,9 +399,8 @@ fn parse_prune_days(value: &str) -> Result<u32, String> {
     }
 }
 
-/// The whole `sync` grammar, including the subcommands whose behavior arrives in a
-/// later release: parsing them here keeps the help text and the "not available yet"
-/// message in one place instead of turning a documented command into a parse error.
+/// The whole `sync` grammar in one place, so the help text and the accepted
+/// options cannot drift apart.
 fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<Command, String> {
     let subcommand = match parser.peek() {
         Some(token) if !token.starts_with('-') => parser.next().unwrap_or_default(),
