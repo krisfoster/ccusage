@@ -57,6 +57,7 @@ Share links need an HMAC credential (`CCUSAGE_SYNC_HMAC_ACCESS_ID` / `CCUSAGE_SY
 - Usage from every agent ccusage supports — Claude, Codex, Gemini, Copilot, and the rest — folded per agent, not Claude alone.
 - A provider comparison table using the same arithmetic as [`ccusage compare`](/guide/provider-comparison) — token counts repriced at another provider's standard list rates.
 - A published price table: every comparison model with its input, output, and cache rates per million tokens, each model linking to where its provider states the rate, and every column sortable.
+- A theme switcher — System, Light, or Dark. System follows your operating system and is the default; an explicit choice is remembered in the browser's local storage for that page only, and nothing about it is uploaded.
 
 ## Custom domains
 

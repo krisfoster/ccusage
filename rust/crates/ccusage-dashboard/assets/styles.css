@@ -1,3 +1,8 @@
+/*
+ * Dark is the default, light is what the media query or an explicit choice
+ * swaps in. `data-theme` is set on <html> by the switcher; with no attribute
+ * the page follows the operating system, which is what "System" selects.
+ */
 :root {
 	color-scheme: light dark;
 	--bg: #0f1115;
@@ -9,7 +14,8 @@
 }
 
 @media (prefers-color-scheme: light) {
-	:root {
+	:root:not([data-theme]) {
+		color-scheme: light;
 		--bg: #f7f8fa;
 		--panel: #ffffff;
 		--line: #e2e5ea;
@@ -17,6 +23,20 @@
 		--muted: #5d6675;
 		--accent: #3b66c4;
 	}
+}
+
+:root[data-theme='light'] {
+	color-scheme: light;
+	--bg: #f7f8fa;
+	--panel: #ffffff;
+	--line: #e2e5ea;
+	--text: #1b1f27;
+	--muted: #5d6675;
+	--accent: #3b66c4;
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
 }
 
 * {

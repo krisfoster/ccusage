@@ -107,6 +107,35 @@ mod tests {
         }
     }
 
+    /// The switcher spans all three files: the page offers the options, the
+    /// script turns the chosen one into a `data-theme` attribute, and the
+    /// stylesheet is the only thing that knows what it looks like. Nothing
+    /// else would notice the three drifting apart.
+    #[test]
+    fn every_theme_the_page_offers_is_one_the_stylesheet_paints() {
+        for theme in ["system", "light", "dark"] {
+            assert!(
+                INDEX.contains(&format!("value=\"{theme}\"")),
+                "the theme switcher no longer offers {theme}"
+            );
+            assert!(
+                APP.contains(&format!("'{theme}'")),
+                "app.js does not handle the {theme} theme"
+            );
+        }
+        // System is the absence of the attribute, so it has no rule of its own.
+        for theme in ["light", "dark"] {
+            assert!(
+                STYLES.contains(&format!(":root[data-theme='{theme}']")),
+                "nothing styles the {theme} theme"
+            );
+        }
+        assert!(
+            STYLES.contains(":root:not([data-theme])"),
+            "the system theme must still follow prefers-color-scheme"
+        );
+    }
+
     fn ids_referenced_by(script: &str) -> Vec<&str> {
         script
             .match_indices("getElementById('")
