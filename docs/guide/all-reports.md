@@ -96,3 +96,6 @@ ccusage zcode daily --json
 - [Session Usage](/guide/session-reports) - Per-conversation usage
 - [Data Sources](/guide/#data-sources) - Supported local data formats
 - [Source Support Q&A](/guide/source-support-qa) - Why some investigated CLIs are not supported
+- [JSON Output](/guide/json-output) - The same reports as structured data
+- [Cloud Sync](/guide/cloud-sync) - Merge these reports across machines into one bucket
+- [Dashboard](/guide/dashboard) - Render the merged data as a single page

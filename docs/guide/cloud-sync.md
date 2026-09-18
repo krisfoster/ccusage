@@ -396,8 +396,28 @@ Publishing a dashboard does not change that: the page is uploaded to a separate
 Usage data stays in the private bucket and is shared, if at all, through
 time-limited signed links.
 
+### What a bucket reader can see
+
+Read access to the data bucket is all-or-nothing, and the object *names* are a
+disclosure on their own. A path like
+`users/<userId>/machines/<machineId>/shards/<agent>/2026/09/17.json` tells the
+reader how many machines you sync from, which agents are installed on each and
+exactly which days you worked, before they open a single file.
+
+So prefer a signed link over an IAM grant when you want to show someone your
+numbers: `ccusage sync dashboard --share` grants read access to the four rollup
+objects for 24 hours (7 days at most) instead of granting a Google account
+`objectViewer` on everything, forever. The link is a bearer token — anyone who
+has it can read those rollups until it expires.
+
+Project paths are hashed with the bucket's salt before upload; set
+`sync.redactProjects` to `false` in `ccusage.json` if you would rather upload
+them in plain text.
+
 ## See also
 
+- [All Reports](/guide/all-reports) — the local reports a sync uploads
+- [Dashboard](/guide/dashboard) — the page built from the bucket
 - [Configuration Files](/guide/config-files)
 - [Environment Variables](/guide/environment-variables)
 - [JSON Output](/guide/json-output)

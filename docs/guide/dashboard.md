@@ -66,3 +66,4 @@ Serving the page from your own domain means putting a CDN or load balancer in fr
 
 - [Cloud Sync](/guide/cloud-sync) — setup, merge semantics, and the object layout.
 - [Provider Comparison](/guide/provider-comparison) — the counterfactual pricing model and its caveats.
+- [JSON Output](/guide/json-output) — the shape of the rollups the page reads.

@@ -59,6 +59,12 @@ You can run ccusage without a global install using `bunx ccusage` (recommended),
 
 Each data source page covers the details that only apply to that source, including custom directories, pricing notes, and source-specific commands.
 
+### ☁️ Cloud Sync and Dashboard
+
+- **[Cloud Sync](/guide/cloud-sync)** - Merge every machine's usage into one private bucket you own
+- **[Dashboard](/guide/dashboard)** - Render the merged data as a single page, locally or published
+- **[Provider Comparison](/guide/provider-comparison)** - Reprice the same tokens at other providers' list rates
+
 ### 🔧 Flexible Configuration
 
 - **JSON Configuration Files** - Set defaults for all commands or customize per-command
@@ -140,8 +146,8 @@ For Claude Code-specific setup and features, start from the [Claude Code data so
 
 ## Privacy & Security
 
-- **100% Local** - All analysis happens on your machine
-- **No Data Transmission** - Your usage data never leaves your computer
+- **Local by default** - All analysis happens on your machine
+- **No data transmission unless you ask for it** - Nothing is uploaded until you run [`ccusage sync`](/guide/cloud-sync), which writes to a bucket you own and create
 - **Read-Only** - ccusage only reads files, never modifies them
 - **Open Source** - Full transparency in how your data is processed
 
@@ -149,7 +155,7 @@ For Claude Code-specific setup and features, start from the [Claude Code data so
 
 ::: warning Important Limitations
 
-- **Local Files Only** - Only analyzes data from your current machine
+- **Local Files Only** - Only analyzes data from your current machine, unless you merge several machines with [Cloud Sync](/guide/cloud-sync)
 - **Language Model Tokens** - API calls for tools like Web Search are not included
 - **Estimate Accuracy** - Costs are estimates and may not reflect actual billing
   :::
