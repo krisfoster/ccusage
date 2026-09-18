@@ -177,6 +177,20 @@ pub(crate) fn repair(
     let registered: BTreeSet<String> = bootstrap::manifest_machines(store, keys)?
         .into_iter()
         .collect();
+    // A machine whose last shard has gone — pruned away, or deleted out of
+    // band — is not in the listing at all, and its index would otherwise keep
+    // promising days nothing can satisfy. Machines with an empty index are
+    // left alone so repair does not create objects for machines that have
+    // never written one.
+    for machine_id in &registered {
+        if !by_machine.contains_key(machine_id)
+            && !machine::load_index(store, keys, user_id, machine_id)?
+                .shards
+                .is_empty()
+        {
+            by_machine.insert(machine_id.clone(), Vec::new());
+        }
+    }
 
     let mut summary = RepairSummary {
         machines: by_machine.len(),
@@ -417,6 +431,18 @@ pub(crate) fn prune(
     }
 
     for (machine_id, shards) in by_machine {
+        // The promises are withdrawn before the objects go, so an interrupted
+        // prune leaves orphan shards rather than index entries pointing at
+        // nothing. An orphan is a state the merge already classifies — it is
+        // ignored until a run or a repair adopts it — whereas a dangling
+        // promise keeps the day in the totals with nothing behind it, and a
+        // rollup pass never re-reads a day whose hash it already has, so it
+        // would not even be reported.
+        machine::update_index(store, keys, user_id, machine_id, |index| {
+            for shard in &shards {
+                index.shards.remove(&shard.day_key());
+            }
+        })?;
         for shard in &shards {
             let key = shard_key(keys, user_id, machine_id, &shard.agent, &shard.utc_date)?;
             match store.delete(&key, &Precondition::None) {
@@ -424,13 +450,6 @@ pub(crate) fn prune(
                 Err(error) => return Err(error.to_string()),
             }
         }
-        // The index entries go with the objects, or the next rollup pass reads
-        // a shard that is not there and reports it as a failure every run.
-        machine::update_index(store, keys, user_id, machine_id, |index| {
-            for shard in &shards {
-                index.shards.remove(&shard.day_key());
-            }
-        })?;
     }
     Ok(summary)
 }

@@ -14,6 +14,9 @@ pub(crate) mod maintenance;
 /// The merge matrices from `specs/sync-merge-test-plan.md`.
 #[cfg(test)]
 mod merge_matrix;
+/// The seeded property layer from `specs/sync-merge-test-plan.md` §4.5.
+#[cfg(test)]
+mod merge_property;
 pub(crate) mod project;
 pub(crate) mod rollups;
 pub(crate) mod run;

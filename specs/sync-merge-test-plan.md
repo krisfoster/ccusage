@@ -297,16 +297,36 @@ rollups from the shards alone and compare. `sync run`'s mutating half is extract
 `run::commit`, so the matrices drive the real write order — register, shards, index CAS,
 `machine.json`, prune, rollups — without a CLI, credentials, or log files.
 
-`sync/merge_matrix.rs` holds 26 tests, each closing with a rebuild-and-compare:
+`sync/merge_matrix.rs` holds 39 tests, each closing with a rebuild-and-compare:
 
 - **4.1** — S1–S8 and S10. S9 and S11–S20 stay where they are, in `rollups.rs`, `salt.rs` and
   `failures.rs`, where they are already covered.
-- **4.2** — F3, F4, F5, F6, F8, F12, F14, F15/F16, F17. Not built: F1, F7, F9, F10, F11, F13, F18.
-- **4.3** — C1, C2, C3, C4/C5, C6/C7, C8, C9, C12. Not built: C10, C11, C13, and the two-real-thread
-  variants of C1–C3; the barrier drives a scripted interleaving instead, which assumes away the
-  schedules a real thread pair would find.
+- **4.2** — every row: F1–F18.
+- **4.3** — every row: C1–C13. C1, C2 and C3 are covered twice, once by a barrier that scripts one
+  interleaving and once by two real OS threads against a shared store, which may either both
+  succeed or lose one run to bounded contention and nothing else.
 
-4.5 (the property layer) and the real-bucket run in 4.6 remain unbuilt.
+**4.5** is built, in `sync/merge_property.rs`: a seeded driver walks 64 fixed sequences of 40 steps
+over `{log, lose a day, sync, sync into a fault at one of six boundaries, refresh, repair}` for two
+machines and five days, asserting after every step that nothing is promised without an object
+behind it, that no total is a number no machine reported, that the incremental rollups equal a
+rebuild from the shards, and that failures name neither the salt, the user id nor an object body.
+Conservation is excused in exactly one state, which the driver derives rather than assumes: while a
+machine's shard object is ahead of the hash its index promises — the residue of a run that died
+between the two writes — an index-following pass and a body-reading pass are allowed to differ,
+until that machine uploads the day again or a repair re-reads the bodies. Every sequence closes
+with a repair, a refresh, and a rebuild-and-compare. Dedupe keys are unique per machine and day
+there, so cross-machine suppression is left to its own tests in 4.1 and `duplicates.rs`.
+
+The real-bucket run in 4.6 remains unbuilt: nothing here has been run against real GCS.
+
+Two behaviours changed because these tests found them. `prune` now withdraws a day's index promise
+before deleting its object, not after: the old order could leave an entry pointing at nothing, and
+since a rollup pass skips a day whose hash it already holds, the gap was never even reported — an
+interrupted prune now leaves an orphan object instead, which is a state the merge already
+classifies. And `repair` now sweeps a registered machine whose index still promises days it has no
+objects for, so a promise orphaned out of band is cleared rather than left for a run that may never
+come.
 
 ## 5. Suggested order
 
