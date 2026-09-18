@@ -321,6 +321,15 @@ impl BucketAdmin {
     /// than being clobbered. Re-running is a no-op once the binding is present,
     /// which keeps deploys idempotent.
     pub(crate) fn grant_public_read(&self) -> Result<bool> {
+        self.grant_object_viewer("allUsers")
+    }
+
+    /// Grants one principal object read access on this bucket.
+    ///
+    /// Used for the dashboard signer service account: a signed URL is only as
+    /// good as the account that signed it, so the account needs read access to
+    /// the data bucket — and nothing else in the project.
+    pub(crate) fn grant_object_viewer(&self, member: &str) -> Result<bool> {
         let mut policy = self.get_iam_policy()?;
         let bindings = policy
             .get_mut("bindings")
@@ -331,7 +340,7 @@ impl BucketAdmin {
                 && binding
                     .get("members")
                     .and_then(Value::as_array)
-                    .is_some_and(|members| members.iter().any(|member| member == "allUsers"))
+                    .is_some_and(|members| members.iter().any(|held| held == member))
                 && binding.get("condition").is_none()
         }) {
             return Ok(false);
@@ -339,7 +348,7 @@ impl BucketAdmin {
         let mut updated = bindings;
         updated.push(json!({
             "role": "roles/storage.objectViewer",
-            "members": ["allUsers"],
+            "members": [member],
         }));
         let etag = string_at(&policy, "etag");
         let mut request = json!({ "version": 3, "bindings": updated });

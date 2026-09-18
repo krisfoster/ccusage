@@ -11,9 +11,15 @@
 //!   A prefix-scoped public binding inside the data bucket would be neater, but
 //!   GCS refuses an IAM condition on an `allUsers` member, so the only boundary
 //!   it will actually enforce is the bucket. The rollups stay in the private
-//!   data bucket, so a deployed page shows nothing until it is opened with a
-//!   `--share` link, whose signed URLs ride in the location fragment and
-//!   therefore never reach a server log.
+//!   data bucket, so a deployed page is only readable through a share link,
+//!   whose signed URLs ride in the location fragment and therefore never reach
+//!   a server log. `--deploy` mints that link itself: publishing a page that
+//!   shows nothing, and telling the user to run a second command, was the
+//!   whole of the old experience.
+//!
+//! The signing key belongs to the dedicated service account `sync setup`
+//! creates, and is read from this machine's state directory rather than from
+//! the user's environment.
 //!
 //! The public/private split is enforced twice over: by the bucket, and by the
 //! key space — `dashboard_asset` is the only constructor that yields a public
@@ -37,14 +43,15 @@ use ccusage_objectstore::{
 use ccusage_sync::rollup::ROLLUP_SCHEMA;
 use serde_json::{Value, json};
 
-use super::{STORAGE_ENDPOINT, status};
+use super::{STORAGE_ENDPOINT, share, status};
 use crate::{
     Result,
     cli::SyncDashboardArgs,
     cli_error,
     gcs::{
-        GcsStore, JsonApi, RetryPolicy,
+        Authorizer, GcsStore, JsonApi, RetryPolicy,
         bucket::{BucketAdmin, BucketSpec, PublicAccessPrevention},
+        signer::SignerAdmin,
     },
     pricing::PricingMap,
 };
@@ -105,23 +112,24 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
         )?;
     }
 
-    let link = if args.share {
-        let hmac = credentials.hmac_key().ok_or_else(|| {
-            cli_error(
-                "share links need an HMAC credential, and this machine is authenticated with \
-                 application-default credentials. Either host the dashboard locally \
-                 (`ccusage sync dashboard`), or create an HMAC key for a service account with \
-                 read access and set CCUSAGE_SYNC_HMAC_ACCESS_ID / CCUSAGE_SYNC_HMAC_SECRET."
-                    .to_string(),
-            )
-        })?;
-        Some(share_link(
-            &bucket,
-            &assets_bucket,
-            &keys,
-            hmac,
-            args.share_ttl_seconds,
-        )?)
+    // Deploying always wants a link: the published page can read nothing
+    // without one, so treating `--deploy` as "publish, then tell the user to
+    // run --share" is just a slower way of reaching the same place.
+    let link = if args.share || args.deploy {
+        match signing_key(&bucket, status.project_id.as_deref(), &credentials) {
+            Some(hmac) => Some(share_link(
+                &bucket,
+                &assets_bucket,
+                &keys,
+                &hmac,
+                args.share_ttl_seconds,
+            )?),
+            None if args.share => return Err(cli_error(NO_SIGNER.to_string())),
+            None => {
+                println!("\n{NO_SIGNER}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -146,8 +154,8 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             let url = public_url(&assets_bucket, &keys);
             println!("\nDashboard: {url}");
             println!(
-                "The page is public; the usage data is not. Run `ccusage sync dashboard --share` \
-                 to mint a link that can read it."
+                "The page is public; the usage data is not, and without a signing key this \
+                 page can read none of it."
             );
             if args.open {
                 open_in_browser(&url);
@@ -155,6 +163,55 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
             Ok(())
         }
         (false, _) => serve_locally(&store, &keys, &public, args.open),
+    }
+}
+
+const NO_SIGNER: &str = "This machine has no key to sign a share link with, and one could not be \
+                         created. Re-run `ccusage sync setup` once the project allows creating a \
+                         service account, or host the dashboard locally with `ccusage sync \
+                         dashboard`.";
+
+/// The key that signs share links, in preference order: the one setup stored,
+/// an HMAC credential the user authenticated with, or one minted now.
+///
+/// Minting here is what makes the feature work for buckets set up before setup
+/// learned to provision a signer — otherwise every such user meets an error
+/// telling them to re-run a command they already ran. It is idempotent: the
+/// account and the key are created once and reused from disk afterwards.
+fn signing_key(
+    bucket: &str,
+    project: Option<&str>,
+    credentials: &Arc<crate::credentials::Credentials>,
+) -> Option<HmacKey> {
+    let path = share::default_path();
+    if let Some(stored) = share::load(&path, bucket) {
+        return Some(stored.hmac_key());
+    }
+    if let Some(hmac) = credentials.hmac_key() {
+        return Some(hmac.clone());
+    }
+    let project = project?;
+    let admin = BucketAdmin::new(
+        JsonApi::new(
+            STORAGE_ENDPOINT,
+            Box::new(Arc::clone(credentials)),
+            RetryPolicy::default(),
+        ),
+        bucket,
+    );
+    let signer_admin = SignerAdmin::new(project, Arc::clone(credentials) as Arc<dyn Authorizer>);
+    match share::ensure(&signer_admin, &admin, bucket, &path) {
+        Ok((signer, _)) => {
+            println!(
+                "Share links are signed by {}, created for this bucket.",
+                signer.service_account
+            );
+            Some(signer.hmac_key())
+        }
+        Err(error) => {
+            println!("Could not create a signing key: {error}");
+            None
+        }
     }
 }
 

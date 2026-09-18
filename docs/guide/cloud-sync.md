@@ -30,7 +30,9 @@ ccusage sync setup
 ```
 
 Setup authenticates, picks a project, creates a bucket if you do not already have
-one, and writes the result to your [configuration file](/guide/config-files):
+one, provisions the read-only service account that signs
+[dashboard](/guide/dashboard#the-signing-key) share links, and writes the result
+to your [configuration file](/guide/config-files):
 
 ```json
 {
@@ -397,7 +399,8 @@ ccusage sync remove --keep-bucket
 
 `remove` is the undo for setup: it deletes every object ccusage uploaded — every
 machine's usage, not just this one's — then the buckets themselves, then the
-`sync` block in your config file. Local logs are untouched, so a later `setup`
+dashboard signer service account with its HMAC keys and this machine's copy of
+the key, then the `sync` block in your config file. Local logs are untouched, so a later `setup`
 and `run` uploads them again from scratch.
 
 It always prints what it is about to delete. Without `--force` it then asks you
@@ -415,7 +418,9 @@ Objects go before buckets and the config goes last, so a removal that fails part
 way through leaves settings that still point at what remains — run it again to
 finish. If the objects are gone but a bucket could not be deleted, the error
 says so and the bucket is yours to delete with
-`gcloud storage rm --recursive gs://<bucket>`.
+`gcloud storage rm --recursive gs://<bucket>`. The signer goes last for the same
+reason, and a project that refuses its deletion prints the
+`gcloud iam service-accounts delete` command to finish by hand.
 
 ## Privacy
 
