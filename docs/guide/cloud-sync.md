@@ -255,9 +255,10 @@ A write that succeeded but whose response never came back is equally harmless.
 Every object has a name derived from the machine, agent and day rather than
 from the attempt, so re-running writes the same name again instead of adding a
 second copy of the day. The same is true of a `--prune` that stopped half way:
-the days it did delete stay deleted, the rest are deleted when you run it
-again, and any day it removed before updating the index is reported as missing
-rather than counted.
+it stops counting each day before it deletes it, so the days it got to stay
+deleted, the rest go when you run it again, and a day it stopped counting but
+never deleted is an uploaded day nothing points at — ignored until the machine
+that owns it syncs, or `ccusage sync repair` adopts it.
 
 Two cases stop a run before it writes:
 
@@ -311,8 +312,9 @@ so a run never reports "nothing to sync" for usage that did not arrive.
 Three other kinds of disagreement are reported the same way — named, left out
 of the totals, and survivable:
 
-- **A day the index promises but the bucket does not hold**, usually a prune or
-  a `forget` that was interrupted. Re-running that command finishes the job;
+- **A day the index promises but the bucket does not hold**, usually a `forget`
+  that was interrupted or an object deleted outside ccusage. `sync repair`
+  withdraws the promise;
   syncing from the machine that owns the day puts it back.
 - **A day written by a newer ccusage** than the one reading it. It is skipped
   whole rather than half-understood; upgrade the machine that is reading.
@@ -335,7 +337,7 @@ actual contents disagree, or when a machine is retired.
 | --- | --- |
 | A total looks wrong, or a machine's days are missing from it | `ccusage sync repair` |
 | `shard(s) could not be read` | `ccusage sync run` on the machine named |
-| `missing from the bucket` after an interrupted prune or forget | re-run that command, or `ccusage sync repair` |
+| `missing from the bucket` after an interrupted forget | re-run that command, or `ccusage sync repair` |
 | `kept changing under this sync` | re-run once the other machine has finished |
 | `another 'ccusage sync' is already running` | wait, or delete the lock file named |
 | A retired machine still counts | `ccusage sync forget <machine-id>` |

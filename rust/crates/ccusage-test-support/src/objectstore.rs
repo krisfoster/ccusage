@@ -241,6 +241,12 @@ impl MemoryStore {
             .sum()
     }
 
+    /// Drops every fault, lost response and hook, fired or not, so a driver
+    /// that arms a fault per step does not carry an unfired one into the next.
+    pub fn clear_rules(&self) {
+        self.state.lock().unwrap().rules.clear();
+    }
+
     /// Forget the request counts, so a test can measure one run out of several.
     pub fn reset_counts(&self) {
         let mut state = self.state.lock().unwrap();

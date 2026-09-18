@@ -15,28 +15,29 @@ use ccusage_sync::shard::{Cell, Dedupe, DedupeKey, SHARD_SCHEMA, Shard};
 use ccusage_test_support::objectstore::{Fault, MemoryStore, Op, When};
 
 use super::machine;
+use super::maintenance;
 use super::rollups;
 use super::run::{self, UploadPlan};
 
-const USER: &str = "user-1";
+pub(super) const USER: &str = "user-1";
 const AGENT: &str = "claude";
-const NOW: &str = "2026-09-17T18:12:03Z";
+pub(super) const NOW: &str = "2026-09-17T18:12:03Z";
 /// Well before any of the test dates settle, so nothing is finalized unless a
 /// case asks for it.
-const NOW_MS: i64 = 1_789_664_000_000;
+pub(super) const NOW_MS: i64 = 1_789_664_000_000;
 
 /// A bucket plus the machine-side moves a run makes against it.
 ///
 /// The store is shared so a fault hook can hold a second handle and run a
 /// whole competing sync from inside another one's request.
 #[derive(Clone)]
-struct Bucket {
-    store: Arc<MemoryStore>,
-    keys: KeySpace,
+pub(super) struct Bucket {
+    pub(super) store: Arc<MemoryStore>,
+    pub(super) keys: KeySpace,
 }
 
 impl Bucket {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             store: Arc::new(MemoryStore::new()),
             keys: KeySpace::new("ccusage/v1").expect("prefix"),
@@ -44,7 +45,7 @@ impl Bucket {
     }
 
     /// One `ccusage sync run`, minus reading local logs: the shards are given.
-    fn sync(&self, machine_id: &str, shards: Vec<Shard>) -> Result<Vec<String>, String> {
+    pub(super) fn sync(&self, machine_id: &str, shards: Vec<Shard>) -> Result<Vec<String>, String> {
         self.sync_at(machine_id, shards, NOW_MS)
     }
 
@@ -82,13 +83,13 @@ impl Bucket {
         serde_json::from_slice(&body).expect("parse daily")
     }
 
-    fn input_tokens(&self) -> u64 {
+    pub(super) fn input_tokens(&self) -> u64 {
         self.daily().totals().input_tokens
     }
 
     /// The totals a bucket with the same shards but no derived state would
     /// have: rollups thrown away and rebuilt in one pass.
-    fn recomputed_input_tokens(&self) -> u64 {
+    pub(super) fn recomputed_input_tokens(&self) -> u64 {
         let fresh = self.store.fork(&["rollup/"]);
         rollups::refresh(&fresh, &self.keys, USER, NOW).expect("recompute");
         let (body, _) = fresh
@@ -101,7 +102,7 @@ impl Bucket {
             .input_tokens
     }
 
-    fn shard_keys(&self) -> Vec<String> {
+    pub(super) fn shard_keys(&self) -> Vec<String> {
         self.store
             .keys()
             .into_iter()
@@ -109,7 +110,7 @@ impl Bucket {
             .collect()
     }
 
-    fn index_dates(&self, machine_id: &str) -> Vec<String> {
+    pub(super) fn index_dates(&self, machine_id: &str) -> Vec<String> {
         machine::load_index(self.store.as_ref(), &self.keys, USER, machine_id)
             .expect("index")
             .shards
@@ -117,11 +118,38 @@ impl Bucket {
             .cloned()
             .collect()
     }
+
+    pub(super) fn refresh(&self) -> Result<rollups::RollupSummary, String> {
+        rollups::refresh(self.store.as_ref(), &self.keys, USER, NOW)
+    }
+
+    fn prune(&self, keep_days: u32, now_ms: i64) -> Result<maintenance::PruneSummary, String> {
+        maintenance::prune(
+            self.store.as_ref(),
+            &self.keys,
+            USER,
+            keep_days,
+            now_ms,
+            false,
+        )
+    }
+
+    fn forget(&self, machine_id: &str) -> Result<maintenance::ForgetSummary, String> {
+        maintenance::forget(self.store.as_ref(), &self.keys, USER, machine_id, NOW)
+    }
+
+    pub(super) fn repair(&self) -> Result<maintenance::RepairSummary, String> {
+        maintenance::repair(self.store.as_ref(), &self.keys, USER, NOW, NOW_MS, false)
+    }
+
+    fn merge_machine(&self, from: &str, into: &str) -> Result<maintenance::MergeSummary, String> {
+        maintenance::merge_machine(self.store.as_ref(), &self.keys, USER, from, into, NOW)
+    }
 }
 
 /// The invariant behind every row of the matrix: the incremental bucket agrees
 /// with one recomputed from the shards alone.
-fn assert_converged(bucket: &Bucket) {
+pub(super) fn assert_converged(bucket: &Bucket) {
     assert_eq!(
         bucket.input_tokens(),
         bucket.recomputed_input_tokens(),
@@ -133,7 +161,7 @@ fn shard(machine_id: &str, date: &str, input: u64) -> Shard {
     shard_with_keys(machine_id, date, input, &[input])
 }
 
-fn shard_with_keys(machine_id: &str, date: &str, input: u64, dedupe: &[u64]) -> Shard {
+pub(super) fn shard_with_keys(machine_id: &str, date: &str, input: u64, dedupe: &[u64]) -> Shard {
     let mut shard = Shard {
         schema: SHARD_SCHEMA,
         agent: AGENT.to_string(),
@@ -582,6 +610,232 @@ fn an_expired_credential_is_reported_as_one_and_the_bucket_converges() {
     assert_converged(&bucket);
 }
 
+/// F1: the very first request of the run fails, so the bucket is never
+/// touched. The interesting part is not the error but what the next run
+/// believes: it has to behave as a first run rather than as a resumed one.
+#[test]
+fn a_failure_before_the_first_write_leaves_a_run_with_nothing_to_resume() {
+    let bucket = Bucket::new();
+    bucket
+        .store
+        .fail_on(When::get("manifest.json"), Fault::Network);
+
+    bucket.sync("aaaa", days(3)).expect_err("never started");
+
+    assert!(bucket.store.keys().is_empty(), "the bucket was written to");
+
+    let written = bucket.sync("aaaa", days(3)).expect("first real run");
+
+    assert_eq!(written.len(), 3);
+    assert_eq!(bucket.input_tokens(), 600);
+    assert_converged(&bucket);
+}
+
+/// F7: the index compare-and-swap loses every one of its attempts. Giving up
+/// is the correct outcome — the alternative is overwriting whatever the other
+/// writer recorded — and the shards it already uploaded stay durable, so the
+/// next run is cheap.
+#[test]
+fn an_index_starved_of_its_cas_attempts_gives_up_without_losing_the_shards() {
+    let bucket = Bucket::new();
+    bucket
+        .store
+        .fail_on(When::put("index.json").times(5), Fault::Conflict);
+
+    let error = bucket.sync("aaaa", days(3)).expect_err("starved");
+
+    assert!(
+        error.contains("kept changing"),
+        "does not name the contention: {error}"
+    );
+    assert_eq!(bucket.shard_keys().len(), 3);
+    assert!(bucket.index_dates("aaaa").is_empty());
+
+    bucket
+        .sync("aaaa", days(3))
+        .expect("retry once it is quiet");
+
+    assert_eq!(bucket.input_tokens(), 600);
+    assert_converged(&bucket);
+}
+
+/// F9: the run dies after the index and before `machine.json`. `lastSyncAt` is
+/// advisory, so the merge must be indifferent to it — asserted by counting the
+/// reads rather than by reasoning about the code.
+#[test]
+fn a_stale_machine_record_does_not_affect_the_merge() {
+    let bucket = Bucket::new();
+    bucket
+        .store
+        .fail_on(When::put("machine.json"), Fault::Network);
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect_err("died before the machine record");
+
+    assert_eq!(bucket.index_dates("aaaa"), vec!["claude/2026-09-10"]);
+    assert!(
+        !bucket
+            .store
+            .keys()
+            .iter()
+            .any(|key| key.ends_with("machine.json")),
+        "the machine record was written after all"
+    );
+
+    bucket.store.reset_counts();
+    bucket.refresh().expect("rollups");
+
+    assert_eq!(bucket.store.op_count(Op::Get, "machine.json"), 0);
+    assert_eq!(bucket.input_tokens(), 100);
+    assert_converged(&bucket);
+}
+
+/// F10: a prune that dies half way through its deletes. The index entries are
+/// withdrawn first, so what is left behind is two orphan objects — a state the
+/// merge already ignores — rather than promises with nothing behind them. The
+/// totals drop the pruned days immediately, and re-running the prune clears
+/// the leftovers.
+///
+/// Written the other way round, the leftover would be silent: a rollup pass
+/// skips a day whose hash it already has, so it would never discover that the
+/// object had gone, and the day would keep counting.
+#[test]
+fn an_interrupted_prune_leaves_orphans_rather_than_dangling_promises() {
+    let bucket = Bucket::new();
+    let much_later_ms = NOW_MS + 400 * 24 * 60 * 60 * 1000;
+    bucket.sync("aaaa", days(4)).expect("first");
+    bucket
+        .store
+        .fail_on(When::delete("/shards/").skip(2), Fault::Network);
+
+    bucket.prune(30, much_later_ms).expect_err("interrupted");
+
+    assert_eq!(bucket.shard_keys().len(), 2, "two deletes should have run");
+    assert!(
+        bucket.index_dates("aaaa").is_empty(),
+        "a promise outlived the object it names"
+    );
+
+    let summary = bucket.refresh().expect("rollups");
+
+    assert_eq!(summary.missing, 0);
+    assert_eq!(bucket.input_tokens(), 0, "pruned days left the totals");
+    assert_converged(&bucket);
+
+    bucket.prune(30, much_later_ms).expect("finish the prune");
+
+    assert!(bucket.shard_keys().is_empty());
+    assert_converged(&bucket);
+}
+
+/// F11: the rollup pass cannot read a shard it needs. Nothing is published
+/// from a partial read — the daily rollup keeps the totals it had — and the
+/// next pass reads the shard and catches up.
+#[test]
+fn a_shard_read_failure_publishes_nothing_and_retries_cleanly() {
+    let bucket = Bucket::new();
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("first");
+    bucket
+        .store
+        .fail_on(When::get("/shards/"), Fault::Server { status: 503 });
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 175)])
+        .expect_err("could not re-read the day");
+
+    assert_eq!(bucket.input_tokens(), 100, "a partial read was published");
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 175)])
+        .expect("retry");
+
+    assert_eq!(bucket.input_tokens(), 175);
+    assert_converged(&bucket);
+}
+
+/// F13: the daily rollup's compare-and-swap loses all five attempts, then the
+/// contention stops. C12 pins the error; this pins the recovery — the winner's
+/// totals stand in the meantime, and the next pass folds this run's day in.
+#[test]
+fn a_daily_rollup_starved_of_its_cas_attempts_catches_up_afterwards() {
+    let bucket = Bucket::new();
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("first");
+    bucket
+        .store
+        .fail_on(When::put("daily.json").times(5), Fault::Conflict);
+
+    let error = bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-11", 50)])
+        .expect_err("starved");
+
+    assert!(
+        error.contains("kept changing"),
+        "does not name the contention: {error}"
+    );
+    assert_eq!(bucket.input_tokens(), 100, "the last good totals stand");
+    assert_eq!(
+        bucket.index_dates("aaaa").len(),
+        2,
+        "the day is vouched for"
+    );
+
+    bucket.refresh().expect("retry once it is quiet");
+
+    assert_eq!(bucket.input_tokens(), 150);
+    assert_converged(&bucket);
+}
+
+/// F18: `forget` unregisters the machine and then fails before deleting its
+/// shards. The roster is what the rollups read, so the usage goes quiet while
+/// the objects are still there — recoverable in either direction, by finishing
+/// the forget or by repairing the machine back onto the roster.
+#[test]
+fn a_forget_that_dies_after_unregistering_can_be_finished_or_undone() {
+    let bucket = Bucket::new();
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("a");
+    bucket
+        .sync("bbbb", vec![shard("bbbb", "2026-09-11", 50)])
+        .expect("b");
+    bucket
+        .store
+        .fail_on(When::delete("/shards/"), Fault::Network);
+
+    bucket.forget("aaaa").expect_err("interrupted");
+
+    let roster =
+        super::bootstrap::manifest_machines(bucket.store.as_ref(), &bucket.keys).expect("roster");
+    assert_eq!(roster, vec!["bbbb".to_string()]);
+    assert!(
+        bucket.shard_keys().iter().any(|key| key.contains("aaaa")),
+        "the shards were deleted after all"
+    );
+
+    bucket.refresh().expect("rollups");
+    assert_eq!(
+        bucket.input_tokens(),
+        50,
+        "an unregistered machine is quiet"
+    );
+    assert_converged(&bucket);
+
+    bucket.repair().expect("repair");
+
+    assert_eq!(bucket.input_tokens(), 150, "repair puts the machine back");
+    assert_converged(&bucket);
+
+    bucket.forget("aaaa").expect("finish the forget");
+
+    assert_eq!(bucket.input_tokens(), 50);
+    assert_converged(&bucket);
+}
+
 // --- C: two runs at once --------------------------------------------------
 
 /// C1: the same machine, the same logs, twice over — the second run slipping
@@ -767,4 +1021,212 @@ fn unending_contention_fails_loudly_rather_than_overwriting() {
         "unhelpful contention error: {error}"
     );
     assert_eq!(bucket.input_tokens(), 100, "the last good totals stand");
+}
+
+/// C10: one machine syncing while another is being forgotten. The forget must
+/// take only its own machine's usage with it: the live machine's day was
+/// already durable when the forget started, and nothing in the forget's
+/// rollup rebuild may drop it.
+#[test]
+fn a_forget_running_under_a_sync_takes_only_its_own_machine() {
+    let bucket = Bucket::new();
+    bucket
+        .sync("bbbb", vec![shard("bbbb", "2026-09-11", 50)])
+        .expect("the machine being forgotten");
+    let interleaved = bucket.clone();
+    bucket.store.before(When::put("daily.json"), move || {
+        interleaved.forget("bbbb").expect("interleaved forget");
+    });
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("live machine");
+
+    let roster =
+        super::bootstrap::manifest_machines(bucket.store.as_ref(), &bucket.keys).expect("roster");
+    assert_eq!(roster, vec!["aaaa".to_string()]);
+    assert!(
+        bucket.shard_keys().iter().all(|key| !key.contains("bbbb")),
+        "the forgotten machine's shards are still there"
+    );
+    assert_eq!(
+        bucket.input_tokens(),
+        100,
+        "the live machine's day survived"
+    );
+    assert_converged(&bucket);
+}
+
+/// C11: a sync racing a prune whose retention window has moved past the day
+/// being uploaded. The prune deletes that shard while it is still an orphan,
+/// and the sync then indexes it, so the run ends with a promise the bucket
+/// cannot keep. That is the worst case for this pair, and what it must not be
+/// is silent: the next rollup pass reports the gap, and `repair` clears it.
+#[test]
+fn a_prune_running_under_a_sync_leaves_only_reported_gaps() {
+    let bucket = Bucket::new();
+    let much_later_ms = NOW_MS + 400 * 24 * 60 * 60 * 1000;
+    bucket.sync("aaaa", days(3)).expect("history");
+    let interleaved = bucket.clone();
+    bucket.store.before(When::put("index.json"), move || {
+        interleaved
+            .prune(30, much_later_ms)
+            .expect("interleaved prune");
+    });
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-20", 25)])
+        .expect("the day being synced");
+
+    assert!(bucket.shard_keys().is_empty(), "the prune took every day");
+    let summary = bucket.refresh().expect("rollups");
+    assert_eq!(summary.missing, 1, "a gap nobody reported");
+    assert_eq!(bucket.input_tokens(), 0, "nothing is counted twice or lost");
+    assert_converged(&bucket);
+
+    bucket.repair().expect("repair");
+
+    assert!(bucket.index_dates("aaaa").is_empty());
+    assert_eq!(bucket.refresh().expect("rollups").missing, 0);
+    assert_converged(&bucket);
+}
+
+/// C13: two merges of the same machine at once. One of them has to lose —
+/// the shards it is moving are gone by the time it looks — and losing has to
+/// mean an error, not a half-moved machine or a doubled day.
+#[test]
+fn two_merges_of_one_machine_do_not_duplicate_or_lose_it() {
+    let bucket = Bucket::new();
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("the machine being merged away");
+    bucket
+        .sync("bbbb", vec![shard("bbbb", "2026-09-11", 50)])
+        .expect("the surviving machine");
+    let interleaved = bucket.clone();
+    bucket.store.before(When::put("/shards/"), move || {
+        interleaved
+            .merge_machine("aaaa", "bbbb")
+            .expect("interleaved merge");
+    });
+
+    let second = bucket.merge_machine("aaaa", "bbbb");
+
+    assert!(
+        second.is_err(),
+        "both merges claimed to move the same shards: {second:?}"
+    );
+    let roster =
+        super::bootstrap::manifest_machines(bucket.store.as_ref(), &bucket.keys).expect("roster");
+    assert_eq!(roster, vec!["bbbb".to_string()]);
+    assert_eq!(bucket.shard_keys().len(), 2, "a day was copied twice");
+    bucket.repair().expect("repair");
+    assert_eq!(bucket.input_tokens(), 150, "the merged usage is intact");
+    assert_converged(&bucket);
+}
+
+// --- C, on real threads ---------------------------------------------------
+//
+// The barrier-driven rows above script one interleaving each, which assumes
+// away the schedules a thread pair would actually find. These run the same
+// three shapes on two OS threads against the shared store, so the interleaving
+// is the scheduler's choice: the assertion is not that a particular thread
+// wins but that whatever happens, the bucket converges and no run ends with an
+// error other than the bounded-contention one it is allowed to report.
+
+/// Two syncs at once, each allowed to lose the CAS race and say so.
+fn race(bucket: &Bucket, left: (&str, Vec<Shard>), right: (&str, Vec<Shard>)) {
+    let (left_id, left_shards) = (left.0.to_string(), left.1);
+    let (right_id, right_shards) = (right.0.to_string(), right.1);
+    let one = bucket.clone();
+    let two = bucket.clone();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let left = scope.spawn(move || one.sync(&left_id, left_shards));
+        let right = scope.spawn(move || two.sync(&right_id, right_shards));
+        (
+            left.join().expect("left thread"),
+            right.join().expect("right thread"),
+        )
+    });
+
+    for outcome in [first, second] {
+        if let Err(error) = outcome {
+            assert!(
+                error.contains("kept changing"),
+                "a racing run failed for a reason other than contention: {error}"
+            );
+        }
+    }
+}
+
+/// C1 on real threads: one machine, one day, run twice at once. Whoever wins,
+/// the day is stored once and counted once.
+#[test]
+fn two_real_threads_syncing_the_same_day_count_it_once() {
+    let bucket = Bucket::new();
+
+    race(
+        &bucket,
+        ("aaaa", vec![shard("aaaa", "2026-09-10", 100)]),
+        ("aaaa", vec![shard("aaaa", "2026-09-10", 100)]),
+    );
+
+    bucket
+        .sync("aaaa", vec![shard("aaaa", "2026-09-10", 100)])
+        .expect("settling run");
+    assert_eq!(bucket.shard_keys().len(), 1);
+    assert_eq!(bucket.input_tokens(), 100);
+    assert_converged(&bucket);
+}
+
+/// C2 on real threads: one machine, a different day in each run — the logs
+/// grew between the two folds. Neither day may be dropped from the index.
+#[test]
+fn two_real_threads_syncing_different_days_keep_both() {
+    let bucket = Bucket::new();
+
+    race(
+        &bucket,
+        ("aaaa", vec![shard("aaaa", "2026-09-10", 100)]),
+        ("aaaa", vec![shard("aaaa", "2026-09-11", 50)]),
+    );
+
+    bucket
+        .sync(
+            "aaaa",
+            vec![
+                shard("aaaa", "2026-09-10", 100),
+                shard("aaaa", "2026-09-11", 50),
+            ],
+        )
+        .expect("settling run");
+    assert_eq!(
+        bucket.index_dates("aaaa"),
+        vec!["claude/2026-09-10", "claude/2026-09-11"]
+    );
+    assert_eq!(bucket.input_tokens(), 150);
+    assert_converged(&bucket);
+}
+
+/// C3 on real threads: one machine, one day, two different readings of it.
+/// One body wins the key; the totals have to be that body's, not the sum.
+#[test]
+fn two_real_threads_disagreeing_about_a_day_agree_with_the_winner() {
+    let bucket = Bucket::new();
+
+    race(
+        &bucket,
+        ("aaaa", vec![shard("aaaa", "2026-09-10", 100)]),
+        ("aaaa", vec![shard("aaaa", "2026-09-10", 175)]),
+    );
+
+    bucket.refresh().expect("settling refresh");
+    assert_eq!(bucket.shard_keys().len(), 1);
+    let total = bucket.input_tokens();
+    assert!(
+        total == 100 || total == 175,
+        "the day was counted as neither reading: {total}"
+    );
+    assert_converged(&bucket);
 }
