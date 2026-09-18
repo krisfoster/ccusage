@@ -101,20 +101,42 @@ fn read_document(path: &Path) -> Result<Map<String, Value>, String> {
 
 /// Written through a temporary file in the same directory, so an interrupted
 /// setup cannot leave a truncated config behind.
+///
+/// A file this call creates is owner-only. The salt is not a credential, but it
+/// is what makes the bucket's project hashes unguessable, and a config created
+/// under the default umask would hand it to every account on a shared machine.
+/// A file the user already has keeps the mode they gave it.
 fn write_document(path: &Path, document: &Map<String, Value>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
+    let existed = path.exists();
     let mut serialized = serde_json::to_string_pretty(&Value::Object(document.clone()))
         .map_err(|error| error.to_string())?;
     serialized.push('\n');
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, serialized)
         .map_err(|error| format!("{}: {error}", temporary.display()))?;
+    if !existed {
+        restrict_to_owner(&temporary)?;
+    }
     fs::rename(&temporary, path).map_err(|error| {
         let _ = fs::remove_file(&temporary);
         format!("{}: {error}", path.display())
     })
+}
+
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -199,6 +221,55 @@ mod tests {
         .expect("persist");
 
         assert_eq!(read(&path)["sync"]["bucket"], json!("ccusage-existing"));
+    }
+
+    /// The salt lands in this file, so a config setup creates on a shared
+    /// machine is not readable by the other accounts on it.
+    #[cfg(unix)]
+    #[test]
+    fn creates_a_new_config_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = fs_fixture!({});
+        let path = fixture.path("ccusage.json");
+
+        persist_sync(
+            &path,
+            &SyncWriteback {
+                salt: Some("a".repeat(64)),
+                ..SyncWriteback::default()
+            },
+        )
+        .expect("persist");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
+    /// Setup writes one key of a file the user owns; silently tightening the
+    /// mode of a config they share with a team would be a surprise.
+    #[cfg(unix)]
+    #[test]
+    fn leaves_the_mode_of_a_config_that_already_exists_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = fs_fixture!({
+            "ccusage.json": r#"{ "sync": { "bucket": "ccusage-existing" } }"#,
+        });
+        let path = fixture.path("ccusage.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        persist_sync(
+            &path,
+            &SyncWriteback {
+                project_id: Some("my-project".to_string()),
+                ..SyncWriteback::default()
+            },
+        )
+        .expect("persist");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "mode was {:o}", mode & 0o777);
     }
 
     #[test]

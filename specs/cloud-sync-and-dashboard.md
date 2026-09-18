@@ -785,6 +785,79 @@ The boundary is therefore the thing GCS actually enforces (the bucket), checked 
 bucket the upload goes to, and by the key space, where `dashboard_asset` remains the only
 constructor yielding a public key.
 
+## 10. Threat model (P6-04)
+
+What an attacker has to hold, what holding it gets them, and what the code does about it. Each row
+names the assertion that keeps it true, so a regression shows up as a failing test rather than as a
+paragraph nobody re-read.
+
+### 10.1 Assets
+
+| Asset | Where it lives | Worst case if read |
+|---|---|---|
+| Usage data (spend, tokens, models, session counts) | data bucket, `users/**` and `rollup/**` | a complete picture of when and how much the user works |
+| Project identities | hashed into shards; plaintext only if the user turns redaction off | which codebases the user works on |
+| Per-bucket salt | `manifest.json`, and the local `ccusage.json` | with bucket read access, turns project hashes back into a guessable set |
+| Dedupe keys (`rollup/keys.json`) | data bucket | provider message/request IDs, salted |
+| Credentials (ADC token, HMAC key) | the OS credential locations, never the config file | full control of the bucket |
+| Object *names* | the data bucket's listing | machine IDs, which agents are installed, and an exact day-by-day activity calendar |
+
+### 10.2 Boundaries and what enforces them
+
+- **Public page vs. private data is a bucket boundary, not a prefix.** GCS refuses an IAM condition
+  on `allUsers` (DR-12), so the page lives in `<data-bucket>-dashboard` and the data bucket is
+  created with public access prevention **enforced**. Checked twice: by which bucket an upload goes
+  to, and by `KeySpace`, where `dashboard_asset` is the only constructor yielding a public key
+  (`classifies_only_dashboard_assets_as_public`, `rejects_dashboard_asset_paths_that_climb_out_of_the_prefix`).
+- **Nothing user-derived is published.** Everything `--deploy` uploads comes from the embedded
+  price and equivalence data, not from the user's logs
+  (`nothing_published_is_derived_from_the_user`).
+- **Credentials never enter the config file.** Setup writes a bucket, project, prefix, two IDs and
+  the salt; `config::from_args` rejects the file outright if a secret-looking key appears in it
+  (`the_written_config_can_only_contain_non_secret_settings`). A config setup *creates* is `0600`,
+  because the salt is in it (`creates_a_new_config_readable_only_by_its_owner`).
+- **Output and errors are scrubbed.** `assert_no_secrets` fails on `ya29.` tokens, HMAC secrets,
+  `X-Goog-Signature` query strings and planted values; it guards status text, status JSON, the
+  credential ladder's rendering and the written config. Gitleaks carries matching rules.
+- **The local dashboard is loopback-only and checks `Host`,** so a page on the internet cannot read
+  a developer's rollups by rebinding DNS to `127.0.0.1`.
+- **Project paths are hashed by default** (`redactProjects` defaults to true), with the salt as the
+  pepper, so a bucket reader sees stable but opaque project identities.
+
+### 10.3 Read-access blast radius — the part worth saying out loud
+
+Granting a teammate `roles/storage.objectViewer` on the data bucket grants them *listing*, and the
+object names alone are a disclosure even if they never download a byte: `users/<userId>/machines/<machineId>/shards/<agent>/<YYYY>/<MM>/<DD>.json`
+tells them how many machines the user syncs from, which agents are installed on each, and exactly
+which days each machine was used — a work calendar, including holidays, sick days and the weekend
+that was not one. The numbers inside are the rest of it.
+
+So **sharing is a signed link, not an IAM grant**. `ccusage sync dashboard --share` mints V4 signed
+URLs for the four rollup objects only — not shards, not `keys.json`, not the manifest — and carries
+them in the URL *fragment*, which browsers never send to the server and which therefore stays out
+of bucket access logs. The link is a bearer token and the CLI says so when it prints one.
+
+- **TTL:** 24h by default, 7d maximum (GCS's own V4 ceiling), `--ttl` rejected outside that and
+  rejected entirely without `--share`.
+- **Revocation:** a signed URL cannot be withdrawn individually. Early revocation is deactivating
+  the HMAC key it was signed with, which invalidates every link signed by that key; the dashboard
+  guide says this where a user minting a link will read it.
+- **Rotation:** minting from a dedicated service account's HMAC key keeps that blast radius off the
+  user's own credentials.
+
+### 10.4 Accepted risks
+
+- **The salt is in `ccusage.json`.** Every machine writing to the bucket needs the same salt, and
+  the bucket's own manifest carries it, so it is no stronger than bucket access; the file mode
+  keeps it off a shared machine's other accounts. It is not a credential and grants nothing alone.
+- **A shared bucket is all-or-nothing.** There is no per-machine or per-day ACL; a reader of the
+  data bucket reads everything in it.
+- **`storage.googleapis.com` is a shared origin.** The published page sits on it with every other
+  public bucket, which is why the share path is fragment-carried signed URLs rather than a
+  browser sign-in holding a token (DR-05).
+- **Turning redaction off is honoured.** `redactProjects: false` uploads plaintext project paths;
+  it is the user's call, made explicitly.
+
 ### Still open
 
 - **P0-02 (public page / private data on a real bucket)** — partly answered the hard way: a real
