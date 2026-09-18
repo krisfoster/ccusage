@@ -342,9 +342,10 @@ actual contents disagree, or when a machine is retired.
 | `another 'ccusage sync' is already running` | wait, or delete the lock file named |
 | A retired machine still counts | `ccusage sync forget <machine-id>` |
 | One machine appears twice after a reinstall | `ccusage sync merge-machine <old> <new>` |
+| You want the whole thing gone | `ccusage sync remove` |
 
-None of these except `forget` and `--prune` can delete usage, so `repair` is
-always safe to try first.
+None of these except `forget`, `remove`, and `--prune` can delete usage, so
+`repair` is always safe to try first.
 
 ### Rebuilding from the data
 
@@ -384,6 +385,37 @@ The old machine's days are moved under the new identity, the old identity is
 removed, and the totals are rewritten. If both identities hold data for the same
 day, the merge is refused rather than picking a winner — decide which copy you
 want, `forget` the other machine, and merge again.
+
+### Removing everything
+
+```bash
+ccusage sync remove
+ccusage sync remove --dry-run    # list what would go, delete nothing
+ccusage sync remove --force      # no confirmation question
+ccusage sync remove --keep-bucket
+```
+
+`remove` is the undo for setup: it deletes every object ccusage uploaded — every
+machine's usage, not just this one's — then the buckets themselves, then the
+`sync` block in your config file. Local logs are untouched, so a later `setup`
+and `run` uploads them again from scratch.
+
+It always prints what it is about to delete. Without `--force` it then asks you
+to type the bucket name; `--force` skips the question, not the warning.
+
+Two things it refuses to take with it:
+
+- Objects outside ccusage's key prefix are never deleted, and a bucket holding
+  any keeps its bucket: point ccusage at a bucket you already use for something
+  else and only the prefix is emptied.
+- `--keep-bucket` empties the prefix but leaves both buckets standing, for a
+  bucket someone else provisioned for you.
+
+Objects go before buckets and the config goes last, so a removal that fails part
+way through leaves settings that still point at what remains — run it again to
+finish. If the objects are gone but a bucket could not be deleted, the error
+says so and the bucket is yours to delete with
+`gcloud storage rm --recursive gs://<bucket>`.
 
 ## Privacy
 

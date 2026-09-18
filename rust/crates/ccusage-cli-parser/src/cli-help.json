@@ -510,6 +510,23 @@
 			"default": "false"
 		}
 	],
+	"sync_remove_options": [
+		{
+			"flags": "-f, --force",
+			"description": "Delete without asking for confirmation",
+			"default": "false"
+		},
+		{
+			"flags": "--dry-run",
+			"description": "List what would be deleted and stop",
+			"default": "false"
+		},
+		{
+			"flags": "--keep-bucket",
+			"description": "Delete the uploaded objects but keep the buckets",
+			"default": "false"
+		}
+	],
 	"sync_dashboard_options": [
 		{
 			"flags": "--deploy",

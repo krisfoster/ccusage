@@ -208,6 +208,36 @@ impl BucketAdmin {
         self.send_bucket_write(&url, Method::Post, &body)
     }
 
+    /// Deletes the bucket itself, reporting whether there was one.
+    ///
+    /// GCS only removes an empty bucket, so a 409 here means objects survived
+    /// the purge that should have preceded this — surfaced rather than
+    /// swallowed, because the alternative is telling the user their data is
+    /// gone when it is not.
+    pub(crate) fn delete(&self) -> Result<bool> {
+        let url = self.bucket_url("");
+        self.api.with_retry(|| {
+            let response = self.api.send_without_body(self.api.agent.delete(&url))?;
+            if response.status == 404 {
+                return Ok(false);
+            }
+            // A bare conflict reads as "someone else wrote it", which is not
+            // what GCS means here.
+            if response.status == 409 {
+                return Err(ObjectStoreError::Other {
+                    detail: format!(
+                        "bucket {} is not empty, so it cannot be deleted",
+                        self.bucket
+                    ),
+                });
+            }
+            if let Some(error) = status_error(&response, &self.bucket) {
+                return Err(error);
+            }
+            Ok(true)
+        })
+    }
+
     /// Flips public access prevention without touching anything else.
     pub(crate) fn set_public_access_prevention(
         &self,
@@ -456,6 +486,37 @@ mod tests {
 
         assert!(matches!(error, ObjectStoreError::Forbidden { .. }));
         assert!(!error.to_string().contains("test-token"));
+    }
+
+    #[test]
+    fn deleting_a_bucket_that_is_already_gone_is_not_an_error() {
+        let fake = ScriptedServer::serving(vec![json(404, r#"{"error":{"message":"Not Found"}}"#)]);
+
+        assert!(!admin_for(&fake).delete().expect("delete"));
+    }
+
+    #[test]
+    fn deleting_a_bucket_reports_that_there_was_one() {
+        let fake = ScriptedServer::serving(vec![json(204, "")]);
+
+        assert!(admin_for(&fake).delete().expect("delete"));
+    }
+
+    /// GCS refuses a bucket that still holds objects. Reporting that as a
+    /// success would tell the user their data is gone when it is not.
+    #[test]
+    fn a_bucket_that_still_holds_objects_refuses_to_be_deleted() {
+        let fake = ScriptedServer::serving(vec![json(
+            409,
+            r#"{"error":{"message":"The bucket you tried to delete is not empty."}}"#,
+        )]);
+
+        let error = admin_for(&fake).delete().expect_err("409 must surface");
+
+        assert!(
+            error.to_string().contains("is not empty"),
+            "a conflict here means objects survived, not a racing writer: {error}"
+        );
     }
 
     #[test]

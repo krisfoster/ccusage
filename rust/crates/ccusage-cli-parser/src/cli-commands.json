@@ -16,6 +16,7 @@
 		"pi_period_options": ["agent_options", "pi_options", "last_options"],
 		"sync_dashboard_combined_options": ["sync_dashboard_options", "sync_options"],
 		"sync_forget_combined_options": ["sync_forget_options", "sync_options"],
+		"sync_remove_combined_options": ["sync_remove_options", "sync_options"],
 		"sync_run_combined_options": ["sync_run_options", "sync_options"],
 		"sync_setup_combined_options": ["sync_setup_options", "sync_options"]
 	},
@@ -911,6 +912,10 @@
 					"description": "Move one machine's data under another machine id"
 				},
 				{
+					"name": "remove",
+					"description": "Delete everything ccusage uploaded, and the buckets"
+				},
+				{
 					"name": "dashboard",
 					"description": "Deploy the dashboard or mint a shareable link"
 				}
@@ -957,6 +962,12 @@
 			"description": "Move one machine's data under another machine id.",
 			"usage": "ccusage sync merge-machine <from> <into> <OPTIONS>",
 			"options": "sync_forget_combined_options"
+		},
+		{
+			"path": ["sync", "remove"],
+			"description": "Delete everything ccusage uploaded, the buckets it created, and the local sync settings.",
+			"usage": "ccusage sync remove <OPTIONS>",
+			"options": "sync_remove_combined_options"
 		},
 		{
 			"path": ["sync", "dashboard"],

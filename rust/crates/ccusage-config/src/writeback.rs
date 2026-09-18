@@ -81,6 +81,22 @@ pub fn persist_sync(path: &Path, values: &SyncWriteback) -> Result<(), String> {
     write_document(path, &document)
 }
 
+/// Drops the whole `sync` block, so the machine no longer points at a bucket.
+///
+/// Returns whether there was one to drop, which is what tells `sync remove`
+/// whether to say it cleaned the config or that there was nothing in it.
+pub fn clear_sync(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut document = read_document(path)?;
+    if document.remove("sync").is_none() {
+        return Ok(false);
+    }
+    write_document(path, &document)?;
+    Ok(true)
+}
+
 fn read_document(path: &Path) -> Result<Map<String, Value>, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -170,6 +186,33 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn clearing_sync_leaves_every_other_setting_behind() {
+        let fixture = fs_fixture!({
+            "ccusage.json": r#"{
+                "mode": "calculate",
+                "sync": { "bucket": "ccusage-9f3a1c2b" }
+            }"#,
+        });
+        let path = fixture.path("ccusage.json");
+
+        assert!(clear_sync(&path).expect("clear"));
+
+        assert_eq!(read(&path), json!({ "mode": "calculate" }));
+    }
+
+    /// `sync remove` calls this even when setup never wrote anything, and a
+    /// missing block is not a failure to report.
+    #[test]
+    fn clearing_a_config_with_no_sync_block_reports_nothing_to_do() {
+        let fixture = fs_fixture!({ "ccusage.json": r#"{ "mode": "calculate" }"# });
+        let path = fixture.path("ccusage.json");
+
+        assert!(!clear_sync(&path).expect("clear"));
+        assert!(!clear_sync(&fixture.path("absent.json")).expect("clear"));
+        assert_eq!(read(&path), json!({ "mode": "calculate" }));
     }
 
     #[test]

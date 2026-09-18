@@ -9,4 +9,4 @@ pub mod writeback;
 
 pub use config::ConfigContext;
 pub use config_schema::generate_config_schema_json;
-pub use writeback::{SyncWriteback, persist_sync, sync_writeback_path};
+pub use writeback::{SyncWriteback, clear_sync, persist_sync, sync_writeback_path};

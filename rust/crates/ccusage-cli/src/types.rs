@@ -62,6 +62,7 @@ pub enum SyncCommand {
     Repair(SyncRepairArgs),
     Forget(SyncForgetArgs),
     MergeMachine(SyncMergeMachineArgs),
+    Remove(SyncRemoveArgs),
     Dashboard(SyncDashboardArgs),
 }
 
@@ -76,6 +77,7 @@ impl SyncCommand {
             Self::Repair(_) => "repair",
             Self::Forget(_) => "forget",
             Self::MergeMachine(_) => "merge-machine",
+            Self::Remove(_) => "remove",
             Self::Dashboard(_) => "dashboard",
         }
     }
@@ -111,6 +113,19 @@ pub struct SyncRepairArgs {
 pub struct SyncForgetArgs {
     pub machine: String,
     pub yes: bool,
+}
+
+/// Undoing a sync: everything ccusage uploaded, the buckets it created, and
+/// the local settings that point at them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncRemoveArgs {
+    /// Deletes without asking. The warning is still printed: `--force` skips
+    /// the question, not the disclosure.
+    pub force: bool,
+    /// Lists what would be deleted and stops.
+    pub dry_run: bool,
+    /// Empties the key prefix but leaves the buckets themselves.
+    pub keep_bucket: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
