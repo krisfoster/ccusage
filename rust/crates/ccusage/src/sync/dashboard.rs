@@ -805,8 +805,14 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains("Content-Type: text/html"), "{response}");
         assert!(response.contains("Cache-Control: no-store"), "{response}");
-        assert!(response.contains("X-Content-Type-Options: nosniff"), "{response}");
-        assert!(response.contains("<title>ccusage</title>"), "{response}");
+        assert!(
+            response.contains("X-Content-Type-Options: nosniff"),
+            "{response}"
+        );
+        // Byte-identical to the file the HTML linter checks, so linting the
+        // source lints what a browser is actually handed.
+        let page = std::str::from_utf8(ASSETS[0].bytes).expect("UTF-8");
+        assert!(response.ends_with(page), "{response}");
     }
 
     #[test]
@@ -836,7 +842,10 @@ mod tests {
 
         assert!(rebound.starts_with("HTTP/1.1 403 Forbidden"), "{rebound}");
         assert!(!rebound.contains("schema"), "{rebound}");
-        assert!(anonymous.starts_with("HTTP/1.1 403 Forbidden"), "{anonymous}");
+        assert!(
+            anonymous.starts_with("HTTP/1.1 403 Forbidden"),
+            "{anonymous}"
+        );
     }
 
     #[test]

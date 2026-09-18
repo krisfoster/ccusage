@@ -382,6 +382,161 @@ mod tests {
         assert_eq!(comparison.excluded_cost, 0.0);
     }
 
+    fn comparisons() -> Vec<Comparison> {
+        let usage = vec![ModelUsage {
+            model: "claude-sonnet-4-5".to_string(),
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            cost: 12.45,
+        }];
+        compare_all(&usage, &EquivalenceMap::embedded(), &rates()).expect("comparisons")
+    }
+
+    #[test]
+    fn the_json_report_names_every_field_the_table_shows() {
+        let comparison = comparisons().remove(0);
+
+        let value = comparison_json(&comparison);
+
+        assert_eq!(value["provider"], comparison.provider);
+        assert_eq!(value["providerLabel"], comparison.provider_label);
+        assert_eq!(value["actualCost"], comparison.actual_cost);
+        assert_eq!(value["counterfactualCost"], comparison.counterfactual_cost);
+        assert_eq!(value["saving"], comparison.saving);
+        assert!(value["rows"].is_array());
+        for caveat in value["caveats"].as_array().expect("caveats") {
+            assert!(
+                caveat["message"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+            );
+        }
+    }
+
+    /// A plan is a flat fee for rate-limited capacity, so it is listed rather
+    /// than netted off; the report still has to say which provider it belongs
+    /// to and what it costs.
+    #[test]
+    fn the_json_report_lists_the_plans_of_the_providers_it_compared() {
+        let comparisons = comparisons();
+
+        let value = plans_json(&comparisons, &PlanList::embedded());
+
+        let rows = value["rows"].as_array().expect("plan rows");
+        assert!(!rows.is_empty());
+        let providers: Vec<&str> = comparisons
+            .iter()
+            .map(|comparison| comparison.provider.as_str())
+            .collect();
+        for row in rows {
+            assert!(providers.contains(&row["provider"].as_str().expect("a provider")));
+            assert!(row["monthlyUsd"].as_f64().is_some_and(|fee| fee > 0.0));
+        }
+    }
+
+    #[test]
+    fn the_table_prints_every_provider_and_its_plans() {
+        let shared = crate::cli::SharedArgs::default();
+
+        print_table(&comparisons(), &EquivalenceMap::embedded(), &shared).expect("a table");
+        print_plans(&comparisons(), &PlanList::embedded(), &shared).expect("a plan table");
+    }
+
+    /// A provider the map cannot price for this workload still belongs in the
+    /// table: leaving it out reads as "no saving", which is a different claim.
+    #[test]
+    fn a_provider_with_nothing_comparable_is_still_a_row() {
+        let unpriceable = Comparison {
+            provider: "nobody".to_string(),
+            provider_label: "Nobody".to_string(),
+            actual_cost: 0.0,
+            counterfactual_cost: 0.0,
+            saving: 0.0,
+            saving_percent: None,
+            excluded_cost: 4.5,
+            rows: Vec::new(),
+            caveats: Vec::new(),
+        };
+
+        assert_eq!(unpriceable.priced_rows(), 0);
+        print_table(
+            &[unpriceable],
+            &EquivalenceMap::embedded(),
+            &crate::cli::SharedArgs::default(),
+        )
+        .expect("a table");
+    }
+
+    #[test]
+    fn a_provider_with_no_plans_prints_no_plan_table() {
+        let empty = PlanList {
+            plans: Vec::new(),
+            ..PlanList::embedded()
+        };
+
+        print_plans(&comparisons(), &empty, &crate::cli::SharedArgs::default())
+            .expect("nothing printed");
+    }
+
+    #[test]
+    fn a_substituted_equivalence_file_replaces_the_shipped_map() {
+        let dir = std::env::temp_dir().join(format!("ccusage-compare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("map.json");
+        std::fs::write(
+            &path,
+            r#"{"schema":1,"updated":"2026-02-02","providers":[{"id":"zai","label":"z.ai"}],
+                "tiers":[{"id":"mid","label":"Mid","matches":["claude-sonnet"],
+                "models":{"zai":"glm-4.6"}}]}"#,
+        )
+        .expect("a map on disk");
+
+        let args = CompareArgs {
+            equivalence: Some(path.clone()),
+            ..CompareArgs::default()
+        };
+        let map = equivalence_map(&args).expect("the substituted map");
+
+        assert_eq!(map.updated, "2026-02-02");
+        assert_eq!(map.tiers.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_equivalence_file_names_the_path_it_could_not_read() {
+        let args = CompareArgs {
+            equivalence: Some(std::path::PathBuf::from("/nonexistent/map.json")),
+            ..CompareArgs::default()
+        };
+
+        let error = equivalence_map(&args).expect_err("refused");
+
+        assert!(
+            format!("{error}").contains("/nonexistent/map.json"),
+            "{error}"
+        );
+    }
+
+    /// Synthetic rows stand in for messages ccusage could not price, so
+    /// pricing them against another provider would invent spend.
+    #[test]
+    fn synthetic_and_model_less_entries_are_left_out_of_the_comparison() {
+        let mut unmodelled = entry("claude-sonnet-4-5", 5, 1.0);
+        unmodelled.model = None;
+
+        let usage = usage_by_model(&[
+            entry("<synthetic>", 100, 9.0),
+            unmodelled,
+            entry("claude-sonnet-4-5", 10, 1.0),
+        ]);
+
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].model, "claude-sonnet-4-5");
+        assert_eq!(usage[0].input_tokens, 10);
+    }
+
     #[test]
     fn entries_are_totalled_per_model_and_ordered_by_spend() {
         let entries = vec![

@@ -116,8 +116,8 @@ in
             node-test = {
               enable = true;
               name = "node test";
-              entry = "${lib.getExe pkgs.nodejs} --test apps/ccusage/src/cli.test.ts nix/tools/models-dev-gen/compact.test.ts";
-              files = "\\.(ts|tsx|js|jsx|mjs|cjs)$";
+              entry = "${lib.getExe pkgs.nodejs} --test apps/ccusage/src/cli.test.ts nix/tools/models-dev-gen/compact.test.ts rust/crates/ccusage-dashboard/dashboard-html.test.ts";
+              files = "\\.(ts|tsx|js|jsx|mjs|cjs|html)$";
               pass_filenames = false;
               stages = [ "pre-push" ];
               priority = 10;
