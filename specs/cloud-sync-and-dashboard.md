@@ -501,6 +501,10 @@ number is testable in Rust with snapshot tests rather than only in the browser.
 
 ### 6.4 Access model: public page, private data
 
+> **Superseded by DR-12.** GCS rejects an IAM condition on `allUsers`, so the single-bucket split
+> described below is not implementable. The page lives in its own `<data-bucket>-dashboard` bucket.
+> The asymmetry this section argues for is unchanged; only the mechanism is.
+
 The requirement is an asymmetry — **the web page is world-readable, the usage data is not**. The
 bucket is therefore split into two access domains:
 
