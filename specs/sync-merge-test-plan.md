@@ -288,6 +288,26 @@ tests are necessary and not sufficient: one end-to-end run against a real bucket
 killed process, a re-run — remains on the list, and is still blocked on `sync setup` being run
 against a billing-enabled project. Nothing in this plan should be read as having verified real GCS.
 
+### 4.7 What is built
+
+4.0 is done: `MemoryStore` takes keyed per-operation faults (`fail_on`), lost responses
+(`lose_response_on`, which writes and *then* errors), barrier hooks (`before`), per-key operation
+counts, and `fork`, which copies a bucket without its derived objects so a test can rebuild the
+rollups from the shards alone and compare. `sync run`'s mutating half is extracted as
+`run::commit`, so the matrices drive the real write order — register, shards, index CAS,
+`machine.json`, prune, rollups — without a CLI, credentials, or log files.
+
+`sync/merge_matrix.rs` holds 26 tests, each closing with a rebuild-and-compare:
+
+- **4.1** — S1–S8 and S10. S9 and S11–S20 stay where they are, in `rollups.rs`, `salt.rs` and
+  `failures.rs`, where they are already covered.
+- **4.2** — F3, F4, F5, F6, F8, F12, F14, F15/F16, F17. Not built: F1, F7, F9, F10, F11, F13, F18.
+- **4.3** — C1, C2, C3, C4/C5, C6/C7, C8, C9, C12. Not built: C10, C11, C13, and the two-real-thread
+  variants of C1–C3; the barrier drives a scripted interleaving instead, which assumes away the
+  schedules a real thread pair would find.
+
+4.5 (the property layer) and the real-bucket run in 4.6 remain unbuilt.
+
 ## 5. Suggested order
 
 1. B1 (done), B2, B4, B7 — the four ways the merge silently or needlessly loses usage today.

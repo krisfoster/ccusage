@@ -302,37 +302,20 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
         // runs would be unhelpful.
         let _lock = lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?;
         let now = iso_now();
-        // Setup put this machine on the roster, but a `sync forget` elsewhere
-        // (or a manifest restored from before this machine existed) would take
-        // it off, and the rollups only read machines the roster names. Without
-        // this, such a machine would upload shards nothing ever counts.
-        bootstrap::register_machine(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
-        upload(
+        let written = commit(
             &store,
             &keys,
             &user_id,
             &machine_id,
-            &plan.uploads,
+            &plan,
+            args.prune,
             &now,
             now_ms(),
         )
         .map_err(cli_error)?;
-        machine::update_machine(&store, &keys, &user_id, &machine_id, |record| {
-            record.last_sync_at = Some(now.clone());
-        })
-        .map_err(cli_error)?;
-        // Before the rollups, so one pass both removes the old days and
-        // rewrites the totals that mentioned them.
-        if let Some(keep_days) = args.prune {
-            let pruned = maintenance::prune(&store, &keys, &user_id, keep_days, now_ms(), false)
-                .map_err(cli_error)?;
-            println!("{}", pruned.to_text());
+        for line in written.notes {
+            println!("{line}");
         }
-        // Always, not only when this machine uploaded: another machine may have
-        // uploaded since the last pass, and the rollups are what the dashboard
-        // reads.
-        let rollup = rollups::refresh(&store, &keys, &user_id, &now).map_err(cli_error)?;
-        println!("{}", rollup.to_text());
         RunSummary {
             uploaded: plan.dates(),
             unchanged: plan.unchanged,
@@ -344,6 +327,55 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     };
     println!("{}", summary.to_text(args.dry_run));
     Ok(())
+}
+
+/// What the writing half of a run did, beyond the plan it was given.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Commit {
+    /// Dates whose shard objects were written.
+    pub written: Vec<String>,
+    /// Lines to print: the prune and rollup summaries, in the order they ran.
+    pub notes: Vec<String>,
+}
+
+/// Every write a run makes, in the one order that keeps a half-finished run
+/// safe: register, shards, index, machine record, prune, rollups.
+///
+/// Separate from `execute` so the ordering can be tested against a store that
+/// fails at a chosen step. `execute` itself needs a config, a credential and
+/// this machine's logs, none of which say anything about merge safety.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    machine_id: &str,
+    plan: &UploadPlan,
+    prune_keep_days: Option<u32>,
+    now: &str,
+    now_ms: i64,
+) -> std::result::Result<Commit, String> {
+    // Setup put this machine on the roster, but a `sync forget` elsewhere (or
+    // a manifest restored from before this machine existed) would take it off,
+    // and the rollups only read machines the roster names. Without this, such
+    // a machine would upload shards nothing ever counts.
+    bootstrap::register_machine(store, keys, user_id, machine_id)?;
+    let written = upload(store, keys, user_id, machine_id, &plan.uploads, now, now_ms)?;
+    machine::update_machine(store, keys, user_id, machine_id, |record| {
+        record.last_sync_at = Some(now.to_string());
+    })?;
+
+    let mut notes = Vec::new();
+    // Before the rollups, so one pass both removes the old days and rewrites
+    // the totals that mentioned them.
+    if let Some(keep_days) = prune_keep_days {
+        notes.push(maintenance::prune(store, keys, user_id, keep_days, now_ms, false)?.to_text());
+    }
+    // Always, not only when this machine uploaded: another machine may have
+    // uploaded since the last pass, and the rollups are what the dashboard
+    // reads.
+    notes.push(rollups::refresh(store, keys, user_id, now)?.to_text());
+    Ok(Commit { written, notes })
 }
 
 /// Agents that failed to load, named with the reason so the user can tell a

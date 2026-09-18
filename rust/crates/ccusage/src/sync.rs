@@ -11,6 +11,9 @@ pub(crate) mod failures;
 pub(crate) mod lock;
 pub(crate) mod machine;
 pub(crate) mod maintenance;
+/// The merge matrices from `specs/sync-merge-test-plan.md`.
+#[cfg(test)]
+mod merge_matrix;
 pub(crate) mod project;
 pub(crate) mod rollups;
 pub(crate) mod run;
