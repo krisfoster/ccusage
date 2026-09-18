@@ -217,17 +217,21 @@ impl Signer {
             });
         }
 
-        let prefix = self.scheme.param_prefix;
+        // Signed under exactly the names the URL carries. The canonical query
+        // string is the query string as sent, and a provider matches parameter
+        // names by code point, so signing `x-goog-date` and sending
+        // `X-Goog-Date` yields a signature the far end cannot reproduce.
+        let prefix = header_case(self.scheme.param_prefix);
         let credential = format!("{}/{}", key.access_id, self.credential_scope(time));
         let query = vec![
             (
-                format!("{prefix}-algorithm"),
+                format!("{prefix}-Algorithm"),
                 self.scheme.algorithm.to_string(),
             ),
-            (format!("{prefix}-credential"), credential),
-            (format!("{prefix}-date"), time.timestamp.clone()),
-            (format!("{prefix}-expires"), expires_secs.to_string()),
-            (format!("{prefix}-signedheaders"), "host".to_string()),
+            (format!("{prefix}-Credential"), credential),
+            (format!("{prefix}-Date"), time.timestamp.clone()),
+            (format!("{prefix}-Expires"), expires_secs.to_string()),
+            (format!("{prefix}-SignedHeaders"), "host".to_string()),
         ];
         let headers = vec![("host".to_string(), host.to_string())];
         let canonical = self.canonical_request(&CanonicalRequest {
@@ -239,17 +243,15 @@ impl Signer {
         });
         let signature = self.signature(key, time, &self.string_to_sign(time, &canonical));
 
-        // Header-cased for readability; Cloud Storage compares parameter names case-insensitively
-        // and the signature was computed over the lowercase forms above.
-        let rendered = query
+        let mut rendered: Vec<String> = query
             .iter()
-            .map(|(name, value)| format!("{}={}", header_case(name), uri_encode(value, true)))
-            .collect::<Vec<_>>()
-            .join("&");
+            .map(|(name, value)| format!("{}={}", uri_encode(name, true), uri_encode(value, true)))
+            .collect();
+        rendered.sort();
+        let rendered = rendered.join("&");
         Ok(format!(
-            "https://{host}{}?{rendered}&{}-Signature={signature}",
+            "https://{host}{}?{rendered}&{prefix}-Signature={signature}",
             uri_encode(path, false),
-            header_case(prefix)
         ))
     }
 }
@@ -259,18 +261,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-/// `x-goog-signedheaders` -> `X-Goog-SignedHeaders`, for the few parameter names whose
-/// conventional rendering is not a straight capitalization.
+/// `x-goog` -> `X-Goog`: the casing providers document for the signed-URL
+/// parameters, and therefore the casing they must be signed under.
 fn header_case(name: &str) -> String {
     name.split('-')
-        .map(|part| match part {
-            "signedheaders" => "SignedHeaders".to_string(),
-            other => {
-                let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                    None => String::new(),
-                }
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
             }
         })
         .collect::<Vec<_>>()
@@ -529,6 +528,61 @@ mod tests {
             assert!(url.contains(expected), "{expected} missing from {url}");
         }
         assert!(!url.contains(SECRET), "the secret must never reach the URL");
+    }
+
+    /// The far end recomputes the signature over the query string it receives,
+    /// so the names signed and the names sent have to be the same bytes. This
+    /// re-derives the signature from the URL as written and compares.
+    #[test]
+    fn signs_the_query_string_it_actually_sends() {
+        let signer = Signer::new(GOOG4_HMAC_SHA256, "auto", "storage");
+        let time = SigningTime::parse(TIMESTAMP).unwrap();
+        let key = HmacKey::new(ACCESS_KEY, SECRET);
+        let path = "/bucket/ccusage/v1/rollup/daily.json";
+        let url = signer
+            .signed_url(&key, &time, "storage.googleapis.com", path, 900)
+            .unwrap();
+
+        let (_, query) = url.split_once('?').expect("a query string");
+        let mut sent: Vec<(String, String)> = Vec::new();
+        let mut claimed = String::new();
+        for pair in query.split('&') {
+            let (name, value) = pair.split_once('=').expect("name=value");
+            if name == "X-Goog-Signature" {
+                claimed = value.to_string();
+            } else {
+                sent.push((name.to_string(), decode(value)));
+            }
+        }
+
+        let canonical = signer.canonical_request(&CanonicalRequest {
+            method: "GET",
+            path,
+            query: sent,
+            headers: vec![("host".to_string(), "storage.googleapis.com".to_string())],
+            payload_hash: "UNSIGNED-PAYLOAD",
+        });
+        assert_eq!(
+            signer.signature(&key, &time, &signer.string_to_sign(&time, &canonical)),
+            claimed
+        );
+    }
+
+    fn decode(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = &value[index + 1..index + 3];
+                out.push(char::from(u8::from_str_radix(hex, 16).expect("hex")));
+                index += 3;
+            } else {
+                out.push(char::from(bytes[index]));
+                index += 1;
+            }
+        }
+        out
     }
 
     #[test]
