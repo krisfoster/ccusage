@@ -396,18 +396,18 @@ function axisTop(peak) {
 	return step * magnitude;
 }
 
-const CHART = { width: 960, height: 220, left: 56, right: 8, top: 10, bottom: 28 };
+const CHART = { minWidth: 280, maxWidth: 960, height: 220, left: 56, right: 8, top: 10, bottom: 28 };
 
 /**
  * The daily chart, drawn as SVG with both axes.
  *
  * A bar chart without a scale invites the reader to guess it, and every guess
- * is wrong by whatever the peak happens to be. The viewBox does the responsive
- * work: the chart keeps its aspect ratio and its labels stay legible at any
- * width without a resize listener.
+ * is wrong by whatever the peak happens to be. The viewBox is measured in CSS
+ * pixels of the space the chart actually has, so a phone gets a shorter chart
+ * rather than the same chart shrunk until its labels are unreadable.
  */
-function series(days) {
-	const { width, height, left, right, top, bottom } = CHART;
+function series(days, width) {
+	const { height, left, right, top, bottom } = CHART;
 	const plotWidth = width - left - right;
 	const plotHeight = height - top - bottom;
 	const peak = Math.max(...days.map((day) => day.totals.cost), 0);
@@ -480,6 +480,18 @@ function series(days) {
 	);
 }
 
+let chartWidth = 0;
+
+/** Redraws the chart at the width its panel currently offers. */
+function drawSeries() {
+	const host = document.getElementById('series');
+	const offered = host.clientWidth || CHART.maxWidth;
+	const width = Math.round(Math.min(CHART.maxWidth, Math.max(CHART.minWidth, offered)));
+	if (width === chartWidth && host.firstChild) return;
+	chartWidth = width;
+	host.replaceChildren(series(state.days, width));
+}
+
 function totalsRows(entries) {
 	return entries.map(([name, totals]) => [
 		name,
@@ -517,8 +529,10 @@ function render() {
 	const cells = days.flatMap((day) => day.cells);
 	const totals = cells.reduce((accumulated, cell) => addCell(accumulated, cell), emptyTotals());
 
+	state.days = days;
 	document.getElementById('totals').replaceChildren(...totalsTiles(totals, days.length));
-	document.getElementById('series').replaceChildren(series(days));
+	chartWidth = 0;
+	drawSeries();
 
 	const modelTotals = Object.fromEntries(groupBy(cells, (cell) => cell.m));
 	const columns = ['', 'Cost', 'Tokens', 'Messages'];
@@ -618,6 +632,9 @@ function timezones() {
 
 async function main() {
 	timezones();
+	new ResizeObserver(() => {
+		if (state.days) drawSeries();
+	}).observe(document.getElementById('series'));
 	try {
 		state.data = await load();
 		render();
