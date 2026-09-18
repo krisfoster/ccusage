@@ -261,12 +261,16 @@ function priceRows(pricing) {
  * chosen column keep the order the caller gave them — and re-clicking a column
  * reverses it. A cell with no value sorts last whichever way the column runs,
  * since "unpublished" is not a price and does not belong at the top.
+ *
+ * Sorting rebuilds the header row, which drops focus to the body; the new
+ * header is refocused so a keyboard reader can press Enter twice to reverse a
+ * column rather than having to tab back to it.
  */
 function sortableTable(headers, rows) {
 	const state = { column: null, descending: true };
 	const container = el('div', { class: 'sortable' });
 
-	const render = () => {
+	const render = (focusColumn) => {
 		let ordered = rows;
 		if (state.column != null) {
 			const direction = state.descending ? -1 : 1;
@@ -306,7 +310,7 @@ function sortableTable(headers, rows) {
 				const toggle = () => {
 					state.descending = state.column === column ? !state.descending : true;
 					state.column = column;
-					render();
+					render(column);
 				};
 				cell.addEventListener('click', toggle);
 				cell.addEventListener('keydown', (event) => {
@@ -330,6 +334,9 @@ function sortableTable(headers, rows) {
 			),
 		);
 		container.replaceChildren(el('table', {}, [el('thead', {}, head), body]));
+		if (focusColumn != null) {
+			head.children[focusColumn]?.focus();
+		}
 	};
 
 	render();
