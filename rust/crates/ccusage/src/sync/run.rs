@@ -17,7 +17,7 @@ use crate::{
     cli::{SharedArgs, SyncRunArgs},
     cli_error, format_rfc3339_millis,
     pricing::PricingMap,
-    sync::{failures, maintenance, rollups, sources},
+    sync::{bootstrap, failures, lock, maintenance, rollups, sources},
 };
 
 /// What a run did, in the terms the user is told about.
@@ -33,6 +33,10 @@ pub(crate) struct RunSummary {
     /// Days that changed after they had settled. Reported because a reader may
     /// already have cached a total this run has just moved.
     pub late_edits: Vec<String>,
+    /// Days this machine has usage for but could not turn into a shard, with
+    /// the reason. Never silent: a day dropped here is usage the bucket will
+    /// not show.
+    pub unhashable: Vec<String>,
 }
 
 impl RunSummary {
@@ -65,6 +69,13 @@ impl RunSummary {
                 self.late_edits.join(", ")
             ));
         }
+        if !self.unhashable.is_empty() {
+            text.push_str(&format!(
+                " Warning: {} day(s) could not be prepared for upload and are missing from the bucket: {}.",
+                self.unhashable.len(),
+                self.unhashable.join("; ")
+            ));
+        }
         text
     }
 }
@@ -76,6 +87,10 @@ pub(crate) struct UploadPlan {
     pub unchanged: usize,
     /// Dates whose shard had been finalized and changed anyway.
     pub late_edits: Vec<String>,
+    /// Dates whose shard could not be hashed, with the reason. These are not
+    /// uploaded, and saying so is the point: dropping them quietly would
+    /// report "nothing to sync" for usage that never arrived.
+    pub unhashable: Vec<String>,
 }
 
 impl UploadPlan {
@@ -87,6 +102,7 @@ impl UploadPlan {
     pub(crate) fn absorb(&mut self, other: Self) {
         self.uploads.extend(other.uploads);
         self.unchanged += other.unchanged;
+        self.unhashable.extend(other.unhashable);
         for date in other.late_edits {
             if !self.late_edits.contains(&date) {
                 self.late_edits.push(date);
@@ -118,8 +134,13 @@ impl UploadPlan {
 pub(crate) fn plan_uploads(shards: Vec<Shard>, index: &MachineIndex, agent: &str) -> UploadPlan {
     let mut plan = UploadPlan::default();
     for mut shard in shards {
-        let Ok(hash) = shard.finish().map(str::to_string) else {
-            continue;
+        let hash = match shard.finish().map(str::to_string) {
+            Ok(hash) => hash,
+            Err(error) => {
+                plan.unhashable
+                    .push(format!("{} {} ({error})", agent, shard.utc_date));
+                continue;
+            }
         };
         if index.is_current(agent, &shard.utc_date, &hash) {
             plan.unchanged += 1;
@@ -271,9 +292,21 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             agents,
             skipped,
             late_edits: plan.late_edits,
+            unhashable: plan.unhashable,
         }
     } else {
+        // Two syncs on one machine are never wanted, only ever an overlapping
+        // cron job or a second terminal. Held until this branch returns, so an
+        // error path releases it too. A dry run takes no lock: it writes
+        // nothing, and refusing to answer "what would this do" while a sync
+        // runs would be unhelpful.
+        let _lock = lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?;
         let now = iso_now();
+        // Setup put this machine on the roster, but a `sync forget` elsewhere
+        // (or a manifest restored from before this machine existed) would take
+        // it off, and the rollups only read machines the roster names. Without
+        // this, such a machine would upload shards nothing ever counts.
+        bootstrap::register_machine(&store, &keys, &user_id, &machine_id).map_err(cli_error)?;
         upload(
             &store,
             &keys,
@@ -306,6 +339,7 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             agents,
             skipped,
             late_edits: plan.late_edits,
+            unhashable: plan.unhashable,
         }
     };
     println!("{}", summary.to_text(args.dry_run));
@@ -411,6 +445,28 @@ mod tests {
             }],
             &context,
         )
+    }
+
+    /// A day that cannot be hashed cannot be uploaded, but dropping it in
+    /// silence would print "nothing to sync" over missing usage — the one
+    /// failure mode a user has no way to notice.
+    #[test]
+    fn a_day_that_cannot_be_hashed_is_named_rather_than_dropped() {
+        let salt = salt();
+        let mut broken = shards(&salt, 10);
+        broken[0].cells[0].model = String::new();
+
+        let plan = plan_uploads(broken, &MachineIndex::default(), AGENT);
+
+        assert!(plan.uploads.is_empty());
+        assert_eq!(plan.unchanged, 0);
+        assert_eq!(plan.unhashable.len(), 1);
+        assert!(plan.unhashable[0].contains("2026-09-17"), "{plan:?}");
+        let summary = RunSummary {
+            unhashable: plan.unhashable,
+            ..RunSummary::default()
+        };
+        assert!(summary.to_text(false).contains("missing from the bucket"));
     }
 
     #[test]
@@ -674,6 +730,7 @@ mod tests {
             agents: vec!["claude".to_string()],
             skipped: Vec::new(),
             late_edits: Vec::new(),
+            unhashable: Vec::new(),
         };
 
         assert!(summary.to_text(true).starts_with("Would upload 1 day(s)"));
@@ -692,6 +749,7 @@ mod tests {
             agents: vec!["claude".to_string()],
             skipped: Vec::new(),
             late_edits: vec!["2026-09-10".to_string()],
+            unhashable: Vec::new(),
         };
 
         let text = summary.to_text(false);

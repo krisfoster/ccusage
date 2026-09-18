@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::machine::{self, IndexEntry, MachineIndex};
 use super::run::parse_date;
-use super::{bootstrap, now_ms, rollups};
+use super::{bootstrap, lock, now_ms, rollups};
 use crate::{
     cli::{SyncForgetArgs, SyncMergeMachineArgs, SyncRepairArgs},
     cli_error,
@@ -528,6 +528,13 @@ fn difference(previous: &MachineIndex, rebuilt: &MachineIndex) -> usize {
 
 pub(crate) fn execute_repair(config: &ConfigContext, args: &SyncRepairArgs) -> crate::Result<()> {
     let session = super::connect(config)?;
+    // Repair rewrites the same indexes and rollups a sync does, so it takes
+    // the same machine-wide lock rather than racing one.
+    let _lock = if args.dry_run {
+        None
+    } else {
+        Some(lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?)
+    };
     let summary = repair(
         &session.store,
         &session.keys,
@@ -561,6 +568,7 @@ pub(crate) fn execute_forget(config: &ConfigContext, args: &SyncForgetArgs) -> c
         println!("Left the bucket unchanged.");
         return Ok(());
     }
+    let _lock = lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?;
     let summary = forget(
         &session.store,
         &session.keys,
@@ -587,6 +595,7 @@ pub(crate) fn execute_merge(
         println!("Left the bucket unchanged.");
         return Ok(());
     }
+    let _lock = lock::acquire(&lock::default_path(), now_ms()).map_err(cli_error)?;
     let summary = merge_machine(
         &session.store,
         &session.keys,

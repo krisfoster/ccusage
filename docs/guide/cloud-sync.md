@@ -218,6 +218,40 @@ Two cases stop a run before it writes:
 `run`, `repair`, `forget`, and `merge-machine` all exit non-zero on failure and
 print what to do next.
 
+### Two syncs at once
+
+Only one sync writes at a time on a given machine. If a second `ccusage sync
+run` starts while one is still going — an overlapping scheduled job, a second
+terminal — it stops immediately:
+
+```
+another 'ccusage sync' is already running on this machine. Wait for it to
+finish, or delete ~/.local/state/ccusage/sync.lock if no sync is running.
+```
+
+`--dry-run` is never blocked, since it writes nothing. A sync killed part-way
+leaves the lock behind; it is ignored after an hour, or you can delete the file
+named in the message. Syncs on *different* machines are expected to overlap and
+are kept safe by the bucket itself rather than by this lock.
+
+### Data in the bucket that cannot be read
+
+A day's object that is corrupt or truncated — an upload cut off mid-write, a
+file edited by hand — is left out of the totals and named, rather than stopping
+the other machines from merging:
+
+```
+2 shard(s) could not be read and are left out of the totals; run
+'ccusage sync run' on the machine that wrote them to replace them.
+```
+
+Running `sync run` on the machine that owns those days rewrites them. Damage to
+the totals themselves is repaired in place: if the daily rollup cannot be read,
+the next sync rebuilds it from the days it is derived from and says so.
+
+Days your machine has usage for but cannot prepare for upload are also named,
+so a run never reports "nothing to sync" for usage that did not arrive.
+
 ## Maintenance
 
 These commands are for the rare occasions when the bucket's bookkeeping and its

@@ -31,7 +31,9 @@ meet that.
 
 ## 2. Findings
 
-Ordered by what they cost the user. B1 is fixed in this branch; the rest are open.
+Ordered by what they cost the user. **All eight are fixed in this branch**; each finding below is
+followed by what was done. The test matrices in §4 remain the plan for proving the merge as a
+whole, and are not all built yet.
 
 ### B1 (release-blocking, fixed here) — the clock check refused every sync on a bucket older than an hour
 
@@ -56,6 +58,9 @@ including the machines that have nothing to do with it, and the error names a ke
 remedy. The tolerated cases show the intended design; this one is an omission. It should be counted
 as `unreadable`, excluded from totals, reported in the summary, and repaired by re-upload.
 
+**Fixed:** counted as `unreadable`, left out of the totals, reported in the summary, and recorded as an
+`unreadableShard` anomaly on `daily.json`; the other machines merge normally.
+
 ### B3 — `daily.json` is fatal where `keys.json` is self-healing
 
 `read_key_index` treats missing, malformed, and future-schema key indexes as "start again" and the
@@ -64,6 +69,9 @@ next pass rebuilds them. `read_daily` treats malformed as fatal. Both are derive
 one users hit, because `daily.json` is the object with the most writers. Either make it self-healing
 (rebuild from shards) or make the error say `ccusage sync repair` in the sentence. Today it says
 neither.
+
+**Fixed:** `read_daily` now rebuilds from the shards when `daily.json` cannot be parsed, and the summary says
+so. A future schema is still left alone rather than overwritten.
 
 ### B4 — a day can be silently dropped from the upload plan
 
@@ -76,6 +84,9 @@ A shard that cannot be hashed is skipped without landing in `uploads`, `unchange
 other refusal in this path is reported; this one is invisible, which is the failure mode the rest of
 the design works hard to avoid.
 
+**Fixed:** the day is collected into `unhashable` and named in the summary, so a run never reports nothing to
+sync over usage that did not leave the machine.
+
 ### B5 — a shard whose contents disagree with its key is dropped from the totals every pass
 
 `daily.apply` derives the cell's identity from the shard *body* (`ShardRef::of(shard)`), while
@@ -84,6 +95,9 @@ prefixes, a `merge-machine` interrupted between rewriting the object and rewriti
 applied ref is absent from `live`, so `stale_refs` forgets it in the same pass that applied it. The
 usage vanishes from the rollup, and re-reading it next pass makes it vanish again. Cheap fix: treat
 a body/key mismatch as an anomaly and refuse the shard loudly.
+
+**Fixed:** `load_shard` compares the body's `ShardRef` with the key it was read from and refuses a mismatch as
+a `misplacedShard` anomaly instead of applying it.
 
 ### B6 — nothing stops two `ccusage sync run` processes on one machine
 
@@ -105,6 +119,10 @@ Recommendation: an advisory lockfile in the config directory with a stale-lock t
 failure message says another sync is running. It is not a substitute for CAS (other machines are
 still concurrent) and must never be treated as one.
 
+**Fixed:** an advisory lockfile at `$XDG_STATE_HOME/ccusage/sync.lock`, taken by the mutating half of `run`
+and by `repair`/`forget`/`merge-machine`, released on drop, broken after an hour so a crash cannot
+wedge the machine. `--dry-run` does not take it. It is not a substitute for CAS.
+
 ### B7 — `sync run` does not ensure the machine is on the roster
 
 Registration happens in `setup` only, but `rollups::refresh` iterates the *roster*, deliberately not
@@ -112,6 +130,8 @@ a listing. So a machine dropped from the manifest — by a `forget` on another m
 restored from an older copy — keeps uploading shards that nothing ever reads, and reports success
 while contributing nothing. `register_machine` is idempotent and costs one GET on the happy path;
 `run` should call it.
+
+**Fixed:** `execute` calls `register_machine` before uploading.
 
 ### B8 — `stale_refs` is quadratic
 
@@ -137,6 +157,8 @@ with two processes, and no test that asserts the bucket's total equals the machi
 
 Priority: **P0** blocks a release that people trust with their data; **P1** is the difference between
 "we believe it works" and "we know what it does"; **P2** is hardening.
+
+**Fixed:** `live` is a `BTreeSet`.
 
 ### 4.0 Test-double work this needs first (P0)
 

@@ -8,6 +8,7 @@ pub(crate) mod bucket;
 pub(crate) mod dashboard;
 pub(crate) mod doctor;
 pub(crate) mod failures;
+pub(crate) mod lock;
 pub(crate) mod machine;
 pub(crate) mod maintenance;
 pub(crate) mod project;
