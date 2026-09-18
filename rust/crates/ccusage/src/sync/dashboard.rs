@@ -767,6 +767,132 @@ mod tests {
         assert!(base.contains("/my-bucket-dashboard/"), "{base}");
     }
 
+    /// Each URL in the fragment has to verify against the query string it
+    /// carries, because that is all the far end has to recompute from. The
+    /// assertions above only prove a fragment exists; a link whose parameters
+    /// were signed under other names still produces one, and every rollup then
+    /// comes back unauthorized.
+    #[test]
+    fn every_url_in_the_fragment_verifies_against_what_it_carries() {
+        let keys = KeySpace::new("ccusage/v1").expect("key space");
+        let hmac = HmacKey::new("GOOG1EXAMPLE", "c2VjcmV0");
+        let signer = Signer::new(GOOG4_HMAC_SHA256, "auto", "storage");
+
+        let link = share_link("my-bucket", &assets_bucket("my-bucket"), &keys, &hmac, 3600)
+            .expect("a link");
+        let sources = decode_fragment(&link);
+
+        for name in ["daily", "weekly", "monthly", "models"] {
+            let url = sources[name].as_str().expect("a signed URL");
+            let (base, query) = url.split_once('?').expect("a query string");
+            let path = base
+                .strip_prefix("https://storage.googleapis.com")
+                .expect("the storage endpoint");
+            assert!(
+                path.starts_with("/my-bucket/"),
+                "{name} does not read the private data bucket: {path}"
+            );
+
+            let mut carried = Vec::new();
+            let mut claimed = String::new();
+            for pair in query.split('&') {
+                let (key, value) = pair.split_once('=').expect("name=value");
+                if key == "X-Goog-Signature" {
+                    claimed = value.to_string();
+                } else {
+                    carried.push((key.to_string(), percent_decode(value)));
+                }
+            }
+            let stamp = carried
+                .iter()
+                .find(|(key, _)| key == "X-Goog-Date")
+                .map(|(_, value)| value.clone())
+                .expect("a signing date");
+            let time = SigningTime::parse(&stamp).expect("a V4 timestamp");
+            let canonical =
+                signer.canonical_request(&ccusage_objectstore::sign::CanonicalRequest {
+                    method: "GET",
+                    path,
+                    query: carried,
+                    headers: vec![("host".to_string(), "storage.googleapis.com".to_string())],
+                    payload_hash: "UNSIGNED-PAYLOAD",
+                });
+
+            assert_eq!(
+                signer.signature(&hmac, &time, &signer.string_to_sign(&time, &canonical)),
+                claimed,
+                "the signature on {name} does not cover the URL it is attached to"
+            );
+        }
+    }
+
+    /// The viewer reads the whole set from one fragment, so a rollup missing
+    /// from it is a panel that silently never fills.
+    #[test]
+    fn the_fragment_names_every_rollup_the_page_reads_and_when_it_dies() {
+        let keys = KeySpace::new("ccusage/v1").expect("key space");
+        let hmac = HmacKey::new("GOOG1EXAMPLE", "c2VjcmV0");
+
+        let link = share_link("my-bucket", &assets_bucket("my-bucket"), &keys, &hmac, 7200)
+            .expect("a link");
+        let sources = decode_fragment(&link);
+
+        let mut named: Vec<&str> = sources.keys().map(String::as_str).collect();
+        named.sort_unstable();
+        assert_eq!(named, ["daily", "expiresAt", "models", "monthly", "weekly"]);
+        for name in ["daily", "weekly", "monthly", "models"] {
+            let url = sources[name].as_str().expect("a signed URL");
+            assert!(url.contains("X-Goog-Expires=7200"), "{name}: {url}");
+            assert!(url.contains(&format!("/rollup/{name}.json?")), "{url}");
+        }
+        assert!(
+            !link.contains("c2VjcmV0"),
+            "the HMAC secret must never reach the link"
+        );
+    }
+
+    /// Mirrors what `app.js` does with `location.hash`: read `s`, undo the
+    /// URL-safe alphabet, `atob`, parse. A payload this cannot decode is a
+    /// blank page however well the URLs inside it are signed.
+    fn decode_fragment(link: &str) -> serde_json::Map<String, Value> {
+        let (_, fragment) = link.split_once('#').expect("a fragment");
+        let encoded = fragment.strip_prefix("s=").expect("the sources parameter");
+        let mut bits = String::new();
+        for character in encoded.chars().filter(|character| *character != '=') {
+            let index = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                .find(character)
+                .unwrap_or_else(|| panic!("{character:?} is outside the URL-safe alphabet"));
+            bits.push_str(&format!("{index:06b}"));
+        }
+        let bytes: Vec<u8> = bits
+            .as_bytes()
+            .chunks(8)
+            .filter(|chunk| chunk.len() == 8)
+            .map(|chunk| {
+                u8::from_str_radix(std::str::from_utf8(chunk).expect("ASCII bits"), 2)
+                    .expect("a byte")
+            })
+            .collect();
+        serde_json::from_slice(&bytes).expect("the fragment carries JSON")
+    }
+
+    fn percent_decode(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut out = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                let hex = &value[index + 1..index + 3];
+                out.push(char::from(u8::from_str_radix(hex, 16).expect("hex")));
+                index += 3;
+            } else {
+                out.push(char::from(bytes[index]));
+                index += 1;
+            }
+        }
+        out
+    }
+
     /// The page is world-readable and the data is not, which on GCS can only be
     /// two buckets: a condition on an `allUsers` binding is rejected outright.
     #[test]
