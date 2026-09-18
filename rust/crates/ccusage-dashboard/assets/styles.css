@@ -73,12 +73,14 @@ select {
 main {
 	padding: 24px;
 	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	gap: 20px;
 	max-width: 1200px;
 	margin: 0 auto;
 }
 
 .panel {
+	min-width: 0;
 	background: var(--panel);
 	border: 1px solid var(--line);
 	border-radius: 10px;
@@ -93,13 +95,13 @@ main {
 .grid {
 	display: grid;
 	gap: 20px;
-	grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
 }
 
 .totals {
 	display: grid;
 	gap: 16px;
-	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
 }
 
 .tile {
@@ -202,7 +204,8 @@ th.sortable-th:focus-visible {
 	outline-offset: -2px;
 }
 
-.sortable {
+.table-scroll {
+	max-width: 100%;
 	overflow-x: auto;
 }
 

@@ -268,7 +268,7 @@ function priceRows(pricing) {
  */
 function sortableTable(headers, rows) {
 	const state = { column: null, descending: true };
-	const container = el('div', { class: 'sortable' });
+	const container = el('div', { class: 'table-scroll sortable' });
 
 	const render = (focusColumn) => {
 		let ordered = rows;
@@ -343,6 +343,11 @@ function sortableTable(headers, rows) {
 	return container;
 }
 
+/**
+ * A fixed table, wrapped so its own columns scroll instead of widening the
+ * page: the cells do not wrap, and a narrow phone would otherwise stretch
+ * every sibling — the chart included — to the widest row.
+ */
 function table(headers, rows) {
 	const head = el(
 		'thead',
@@ -364,7 +369,7 @@ function table(headers, rows) {
 			),
 		),
 	);
-	return el('table', {}, [head, body]);
+	return el('div', { class: 'table-scroll' }, el('table', {}, [head, body]));
 }
 
 function totalsTiles(totals, dayCount) {
