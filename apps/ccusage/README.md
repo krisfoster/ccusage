@@ -174,6 +174,69 @@ bunx ccusage --compact  # Force compact table mode
 bunx ccusage monthly --compact  # Compact monthly report
 ```
 
+## Cloud sync, dashboard, and provider comparison
+
+`ccusage sync` merges every machine's usage into one private object-storage
+bucket (Google Cloud Storage today), and `ccusage sync dashboard` renders that
+bucket as a single page. Full detail lives in
+[Cloud Sync](https://ccusage.com/guide/cloud-sync) and
+[Dashboard](https://ccusage.com/guide/dashboard).
+
+```bash
+# First machine: sign in, pick a project, make the bucket, save the config
+ccusage sync setup
+ccusage sync run              # upload; a re-run uploads only what changed
+ccusage sync run --dry-run    # show the plan, write nothing
+
+# Another machine, pointed at the same bucket (adopts its id and salt)
+ccusage sync setup --bucket ccusage-9f3a1c2b4405
+ccusage sync run
+
+# Inspect
+ccusage sync status --json    # resolved target, identity, last sync
+ccusage sync doctor           # credentials, bucket, CAS, clock skew
+```
+
+Machines merge into one set of rollups: usage two machines both saw is counted
+once, late edits to settled days are reported rather than hidden, and an
+interrupted run is finished by the next one.
+
+```bash
+ccusage sync repair                 # rebuild indexes and rollups from shards
+ccusage sync run --prune 365        # drop uploaded days older than a year
+ccusage sync forget <machine-id>    # retire a machine and its data
+ccusage sync merge-machine <a> <b>  # a reinstalled machine counted twice
+ccusage sync remove                 # delete everything, buckets included
+ccusage sync remove --dry-run       # ...or list it and stop (--force skips
+                                    #    the confirmation)
+```
+
+The dashboard is local by default. Publishing keeps the data bucket private and
+puts the page in a separate public `<bucket>-dashboard` bucket, which reads the
+numbers through time-boxed signed URLs carried in the link's fragment:
+
+```bash
+ccusage sync dashboard --open           # host on 127.0.0.1, your credentials
+ccusage sync share                      # enable share links (once per bucket)
+ccusage sync dashboard --deploy --open  # publish, and open a readable link
+ccusage sync dashboard --share --ttl 2d # mint a link; 24h default, 7d max
+ccusage sync share --disable            # revoke; every handed-out link dies
+```
+
+`--deploy` and `--share` error until `ccusage sync share` has run; hosting
+locally never needs it. Open the printed link with its `#s=...` fragment — the
+bare page URL is public but shows no numbers, and the link itself is a bearer
+credential until it expires.
+
+[Provider Comparison](https://ccusage.com/guide/provider-comparison) reprices
+the tokens you already spent at another provider's list rates:
+
+```bash
+ccusage compare
+ccusage compare --provider zai
+ccusage compare --since 20250101 --until 20250131 --json
+```
+
 ## Features
 
 - 📊 **Daily Report**: View token usage and costs aggregated by date
