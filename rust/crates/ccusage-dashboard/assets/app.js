@@ -96,11 +96,13 @@ async function fetchJson(url, { optional = false } = {}) {
 async function load() {
 	const signed = fragmentSources();
 	const at = (name) => (signed && signed[name]) || `data/${name}.json`;
-	const [daily, weekly, monthly, models, pricing, equivalence] = await Promise.all([
+	const [daily, weekly, monthly, models, machines, pricing, equivalence] = await Promise.all([
 		fetchJson(at('daily')),
 		fetchJson(at('weekly'), { optional: true }),
 		fetchJson(at('monthly'), { optional: true }),
 		fetchJson(at('models'), { optional: true }),
+		// Only the locally hosted dashboard serves this; a published one shows machine ids.
+		fetchJson(at('machines'), { optional: true }),
 		fetchJson('pricing.json', { optional: true }),
 		fetchJson('model-equivalence.json', { optional: true }),
 	]);
@@ -109,7 +111,7 @@ async function load() {
 			`This bucket was written by a newer ccusage (rollup schema ${daily.schema}); upgrade to read it.`,
 		);
 	}
-	return { daily, weekly, monthly, models, pricing, equivalence, expiresAt: signed?.expiresAt };
+	return { daily, weekly, monthly, models, machines, pricing, equivalence, expiresAt: signed?.expiresAt };
 }
 
 /* ------------------------------------------------------------ re-bucketing */
@@ -503,6 +505,49 @@ function totalsRows(entries) {
 	]);
 }
 
+function ago(iso, now = Date.now()) {
+	const elapsed = Math.max(0, now - Date.parse(iso));
+	const minutes = Math.floor(elapsed / 60000);
+	if (minutes < 1) return 'just now';
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 48) return `${hours}h ago`;
+	return `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
+ * One row per machine: its label, and under it whether it is still syncing and when it last did. A
+ * sandbox that has been removed never says so, so "retired" is only a statement that it has been
+ * quiet for a while. Every machine on the roster is listed, even one whose usage is all counted
+ * elsewhere or that has not synced yet. Without the machine list (a published page) the rows are
+ * the plain ids.
+ */
+function machineTable(entries, machines, columns) {
+	const known = new Map((machines?.machines || []).map((machine) => [machine.id, machine]));
+	if (known.size === 0) {
+		return table(['Machine', ...columns.slice(1)], totalsRows(entries));
+	}
+	const counted = new Map(entries);
+	const ids = [...entries.map(([id]) => id), ...[...known.keys()].filter((id) => !counted.has(id))];
+	const rows = ids.map((id) => {
+		const machine = known.get(id);
+		const name = machine?.label && machine.label !== id ? machine.label : id;
+		const status = !machine
+			? ''
+			: machine.retired
+				? `retired, last synced ${ago(machine.lastSyncAt)}`
+				: machine.lastSyncAt
+					? `active, synced ${ago(machine.lastSyncAt)}`
+					: 'not synced yet';
+		const cell = el('div', { title: id }, [
+			name,
+			status ? el('div', { class: 'muted' }, status) : '',
+		]);
+		return [cell, ...totalsRows([[id, counted.get(id) || emptyTotals()]])[0].slice(1)];
+	});
+	return table(['Machine', ...columns.slice(1)], rows);
+}
+
 function notices(daily, cells) {
 	const items = [];
 	for (const anomaly of daily.anomalies || []) {
@@ -526,7 +571,7 @@ function notices(daily, cells) {
 }
 
 function render() {
-	const { daily, weekly, monthly, models, pricing, equivalence, expiresAt } = state.data;
+	const { daily, weekly, monthly, models, machines, pricing, equivalence, expiresAt } = state.data;
 	const days = localDays(daily, state.timezone);
 	const cells = days.flatMap((day) => day.cells);
 	const totals = cells.reduce((accumulated, cell) => addCell(accumulated, cell), emptyTotals());
@@ -543,7 +588,7 @@ function render() {
 		.replaceChildren(table(['Model', ...columns.slice(1)], totalsRows(Object.entries(modelTotals))));
 	document
 		.getElementById('machines')
-		.replaceChildren(table(['Machine', ...columns.slice(1)], totalsRows(groupBy(cells, (cell) => cell.machine))));
+		.replaceChildren(machineTable(groupBy(cells, (cell) => cell.machine), machines, columns));
 	document
 		.getElementById('agents')
 		.replaceChildren(table(['Agent', ...columns.slice(1)], totalsRows(groupBy(cells, (cell) => cell.agent))));

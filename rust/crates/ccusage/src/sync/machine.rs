@@ -160,6 +160,18 @@ pub(crate) fn update_index(
     ))
 }
 
+pub(crate) fn load_record(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    machine_id: &str,
+) -> Result<MachineRecord> {
+    let key = keys
+        .machine(user_id, machine_id)
+        .map_err(|error| error.to_string())?;
+    read(store, &key).map(|(record, _)| record)
+}
+
 pub(crate) fn load_index(
     store: &dyn ObjectStore,
     keys: &KeySpace,

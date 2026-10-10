@@ -10,6 +10,7 @@ pub(crate) mod doctor;
 pub(crate) mod failures;
 pub(crate) mod lock;
 pub(crate) mod machine;
+pub(crate) mod machines;
 pub(crate) mod maintenance;
 /// The merge matrices from `specs/sync-merge-test-plan.md`.
 #[cfg(test)]
@@ -79,6 +80,9 @@ pub(crate) fn run(args: SyncArgs) -> Result<()> {
         SyncCommand::Share(share_args) => share::execute(&config, &share_args),
         SyncCommand::Dashboard(dashboard_args) => dashboard::execute(&config, &dashboard_args),
         SyncCommand::Serve(serve_args) => serve_hub(&serve_args, &config),
+        SyncCommand::Machines(machines_args) => {
+            machines::execute(&config, &machines_args, args.json)
+        }
     }
 }
 

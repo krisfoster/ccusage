@@ -1995,6 +1995,47 @@ fn sync_setup_rejects_providers_it_does_not_know() {
 }
 
 #[test]
+fn sync_machines_lists_with_a_default_window_unless_told_otherwise() {
+    let defaults = sync_args(&["ccusage", "sync", "machines"]);
+    assert_eq!(
+        defaults.command,
+        SyncCommand::Machines(SyncMachinesArgs::default())
+    );
+
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "machines",
+        "--retired-after",
+        "30",
+        "--json",
+    ]);
+    assert!(args.json);
+    assert_eq!(
+        args.command,
+        SyncCommand::Machines(SyncMachinesArgs {
+            retired_after_days: Some(30)
+        })
+    );
+}
+
+#[test]
+fn sync_machines_rejects_a_retirement_window_that_would_retire_everyone() {
+    for value in ["0", "soon", ""] {
+        assert!(
+            parse_error(&["ccusage", "sync", "machines", "--retired-after", value])
+                .contains("Expected a whole number of days, at least 1"),
+            "{value:?}"
+        );
+    }
+    // A leading dash reads as the next flag, so a negative number never gets as far as the range check.
+    assert_eq!(
+        parse_error(&["ccusage", "sync", "machines", "--retired-after", "-3"]),
+        "Missing value for --retired-after"
+    );
+}
+
+#[test]
 fn sync_forget_requires_the_machine_it_deletes() {
     let args = sync_args(&["ccusage", "sync", "forget", "laptop", "--yes"]);
 

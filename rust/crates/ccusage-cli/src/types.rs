@@ -66,6 +66,7 @@ pub enum SyncCommand {
     Share(SyncShareArgs),
     Dashboard(SyncDashboardArgs),
     Serve(SyncServeArgs),
+    Machines(SyncMachinesArgs),
 }
 
 impl SyncCommand {
@@ -83,6 +84,7 @@ impl SyncCommand {
             Self::Share(_) => "share",
             Self::Dashboard(_) => "dashboard",
             Self::Serve(_) => "serve",
+            Self::Machines(_) => "machines",
         }
     }
 }
@@ -114,6 +116,13 @@ pub struct SyncSetupArgs {
     pub non_interactive: bool,
     /// Allows replacing an already configured bucket, which setup otherwise refuses to do.
     pub recreate: bool,
+}
+
+/// Listing who has synced into a store, and who has gone quiet.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SyncMachinesArgs {
+    /// Days without a sync after which a machine is called retired. `None` uses the default.
+    pub retired_after_days: Option<u32>,
 }
 
 /// Serving a directory to other processes, such as sandboxes, over HTTP.

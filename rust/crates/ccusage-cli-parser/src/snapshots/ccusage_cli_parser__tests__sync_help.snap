@@ -18,6 +18,7 @@ COMMANDS:
   remove        Delete everything ccusage uploaded, and the buckets
   share         Enable share links for the dashboard, or disable them
   dashboard     Open the dashboard, deploy it, or mint a shareable link
+  machines      List the machines that have synced, and which have gone quiet
   serve         Serve a directory over HTTP so sandboxes can sync into it
 
 For more info, run any command with the `--help` flag:
@@ -31,4 +32,5 @@ For more info, run any command with the `--help` flag:
   ccusage sync remove --help
   ccusage sync share --help
   ccusage sync dashboard --help
+  ccusage sync machines --help
   ccusage sync serve --help

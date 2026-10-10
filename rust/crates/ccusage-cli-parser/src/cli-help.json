@@ -521,6 +521,13 @@
 			"default": "false"
 		}
 	],
+	"sync_machines_options": [
+		{
+			"flags": "--retired-after <days>",
+			"description": "Call a machine retired once it has not synced for this many days",
+			"default": "14"
+		}
+	],
 	"sync_serve_options": [
 		{
 			"flags": "--dir <dir>",

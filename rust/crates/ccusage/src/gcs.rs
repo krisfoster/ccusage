@@ -393,7 +393,7 @@ fn meta_from_value(key: &str, value: &serde_json::Value) -> ObjectMeta {
 }
 
 /// Parses the subset of RFC 3339 the JSON API emits (`2024-05-06T07:08:09.123Z`).
-fn parse_rfc3339_ms(value: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339_ms(value: &str) -> Option<i64> {
     let (date, rest) = value.split_once('T')?;
     let time = rest.trim_end_matches('Z');
     let mut date_parts = date.split('-');

@@ -7,8 +7,9 @@ use ccusage_cli::{
     CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS,
     OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder,
     StatuslineArgs, SyncArgs, SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs,
-    SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs, SyncRunArgs, SyncServeArgs,
-    SyncSetupArgs, SyncShareArgs, VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
+    SyncMachinesArgs, SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs,
+    SyncRunArgs, SyncServeArgs, SyncSetupArgs, SyncShareArgs, VisualBurnRate, WeekDay, WeeklyArgs,
+    normalize_date_bound,
 };
 
 use crate::Cli;
@@ -567,6 +568,26 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
             }
             SyncCommand::Dashboard(args)
         }
+        "machines" => {
+            let mut args = SyncMachinesArgs::default();
+            parse_sync_options(
+                parser,
+                "machines",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--retired-after" => {
+                            args.retired_after_days =
+                                Some(parse_retired_after(&parser.value_for("--retired-after")?)?)
+                        }
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
+            SyncCommand::Machines(args)
+        }
         "serve" => {
             let mut args = SyncServeArgs::default();
             parse_sync_options(
@@ -631,6 +652,17 @@ fn sync_positional(parser: &mut ArgParser, subcommand: &str, name: &str) -> Resu
         Some(token) if !token.starts_with('-') => Ok(parser.next().unwrap_or_default()),
         _ => Err(format!(
             "The sync {subcommand} command requires a <{name}> argument."
+        )),
+    }
+}
+
+/// Days of silence before a machine counts as retired. At least one: zero would retire every machine
+/// the moment it finished syncing.
+fn parse_retired_after(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(days) if days >= 1 => Ok(days),
+        _ => Err(format!(
+            "Invalid value for --retired-after '{value}'. Expected a whole number of days, at least 1."
         )),
     }
 }

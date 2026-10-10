@@ -462,6 +462,18 @@ fn serve_locally(
     }
     check_schema(&data)?;
 
+    // Names, last sync and retirement for the Machines panel. Without them the page falls back to
+    // machine ids, so a store that cannot list its machines still gets a dashboard.
+    let retired_after = super::machines::DEFAULT_RETIRED_AFTER_DAYS;
+    if let Ok(machines) = super::machines::list(store, keys, super::now_ms(), retired_after)
+        && !machines.is_empty()
+    {
+        let document = super::machines::to_json(&machines, retired_after, &super::run::iso_now());
+        if let Ok(bytes) = serde_json::to_vec(&document) {
+            data.push(("data/machines.json".to_string(), bytes));
+        }
+    }
+
     let listener = bind_local()?;
     let port = listener
         .local_addr()
