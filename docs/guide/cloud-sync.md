@@ -202,6 +202,20 @@ you exported or quoted a total before it moved. A run that reports this
 repeatedly for the same day usually means a clock problem or a log being
 rewritten after the fact.
 
+### Logs that are deleted
+
+Coding agents delete old session files by age, and a day is made of entries from
+several files, so a day can outlive part of its own usage. Syncing never turns
+that into a loss. When a day you uploaded before comes back smaller, each
+15-minute bucket keeps whichever side holds all of the entries (the one already
+uploaded, if the newer one holds only some of them), so a total never goes down
+because a log was cleaned up. A day that disappears completely was already
+kept. Only `--prune` and `sync forget` delete uploaded usage.
+
+If two buckets each hold entries the other lacks, the two cannot be added, since
+a bucket stores one total rather than one per message, so the larger total is
+kept.
+
 ### Machines that see the same logs
 
 If two machines read the same usage logs — a synced home directory, a restored

@@ -57,6 +57,31 @@ Read the result on the host with the same directory:
 ccusage sync dashboard --open
 ```
 
+## See who has synced
+
+```bash
+ccusage sync machines
+```
+
+```text
+MACHINE                      STATUS   LAST SYNC    DAYS  USAGE                     AGENTS
+web-app-sandbox (98029dfe)   active   today        12    2026-09-30 to 2026-10-10  claude
+data-pipeline (4243722f)     active   2 days ago   4     2026-10-02 to 2026-10-08  claude, codex
+old-demo (687f69d9)          retired  30 days ago  3     2026-08-05 to 2026-10-09  claude
+```
+
+Machines are named by their `machineLabel`, followed by the start of their id. A sandbox that is removed never
+says goodbye, so a machine that has not synced for 14 days is called retired. Change the window with
+`--retired-after <days>`. Nothing is changed or deleted: a retired machine's usage stays in the totals, and the
+label only helps you tell it apart. `--json` prints the same list for scripts.
+
+The local dashboard uses the same information. Its Machines panel names each machine, shows whether it is active
+or retired and when it last synced, and lists machines that have no usage of their own to count, such as one
+whose usage was all reported by another machine too.
+
+A sandbox that is removed and created again with the same name is a new machine, with a new id. The old one stays
+on the list until it retires.
+
 ## What the hub protects against
 
 Treat everything the hub receives as untrusted, because the process on the other end may be an AI agent.
