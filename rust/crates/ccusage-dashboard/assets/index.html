@@ -28,9 +28,14 @@
 		</header>
 
 		<main id="app" hidden>
+			<section class="filters" id="filters" aria-label="Filters"></section>
 			<section class="totals" id="totals"></section>
 			<section class="panel">
-				<h2>Daily spend</h2>
+				<div class="panel-head">
+					<h2>Daily spend</h2>
+					<div class="panel-controls" id="chart-controls"></div>
+				</div>
+				<div id="legend" class="legend" hidden></div>
 				<div id="series" class="series"></div>
 			</section>
 			<section class="grid">
@@ -38,7 +43,7 @@
 					<h2>Models</h2>
 					<div id="models"></div>
 				</div>
-				<div class="panel">
+				<div class="panel span-2">
 					<h2>Machines</h2>
 					<div id="machines"></div>
 				</div>
@@ -57,6 +62,17 @@
 				<div class="panel">
 					<h2>Notices</h2>
 					<div id="notices"></div>
+				</div>
+			</section>
+			<section class="grid wide">
+				<div class="panel" id="projects-panel" hidden>
+					<h2>Projects</h2>
+					<div id="projects"></div>
+				</div>
+				<div class="panel" id="sessions-panel" hidden>
+					<h2>Sessions</h2>
+					<div id="sessions"></div>
+					<p class="muted" id="sessions-note"></p>
 				</div>
 			</section>
 			<section class="panel">

@@ -94,7 +94,7 @@ mod tests {
     /// SVG are the only thing giving it axes, gridlines and bars.
     #[test]
     fn the_chart_classes_the_script_draws_are_styled() {
-        for class in ["bar", "grid", "axis", "tick"] {
+        for class in ["seg", "hit", "grid", "axis", "tick"] {
             assert!(
                 APP.contains(&format!("class: '{class}'"))
                     || APP.contains(&format!("class: '{class} ")),
@@ -104,6 +104,38 @@ mod tests {
                 STYLES.contains(&format!(".series .{class}")),
                 ".series .{class} is drawn but not styled"
             );
+        }
+    }
+
+    /// A stacked bar takes its colour from one of eight slots by rank, and every theme has to define all
+    /// of them and the neutral that the tail folds into, or a series would draw with no fill.
+    #[test]
+    fn every_theme_defines_every_series_colour() {
+        let slots: Vec<String> = (1..=8).map(|slot| format!("--series-{slot}:")).collect();
+        for name in slots.iter().map(String::as_str).chain(["--series-other:"]) {
+            // Dark by default, light under the media query, and light by choice.
+            assert!(
+                STYLES.matches(name).count() >= 3,
+                "{name} is not defined in every theme"
+            );
+        }
+        assert!(
+            APP.contains("--series-other"),
+            "the script never uses the neutral for the tail"
+        );
+    }
+
+    /// Series, project and machine names come from the data, so they have to go in as text. The page
+    /// never builds markup from a string.
+    #[test]
+    fn the_script_never_builds_markup_from_data() {
+        for banned in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ] {
+            assert!(!APP.contains(banned), "app.js uses {banned}");
         }
     }
 
