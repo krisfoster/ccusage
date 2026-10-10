@@ -152,6 +152,19 @@ export CCUSAGE_SYNC_HMAC_SECRET="..."
 ccusage sync setup --auth hmac
 ```
 
+### CCUSAGE_SYNC_TOKEN
+
+The bearer token for a `ccusage sync serve` hub, read when `sync.provider` is `http`. It is never read from
+the configuration file. Inside a Docker sandbox this can hold a placeholder that the sandbox proxy replaces
+on the wire, so the real token never enters the sandbox:
+
+```bash
+export CCUSAGE_SYNC_TOKEN="$(cat ~/.config/ccusage/hub-token)"
+ccusage sync run
+```
+
+See [Local Sync and Sandboxes](/guide/local-sync).
+
 ### GOOGLE_APPLICATION_CREDENTIALS
 
 Path to an Application Default Credentials file for cloud sync. ccusage accepts

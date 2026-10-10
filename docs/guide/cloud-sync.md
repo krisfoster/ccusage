@@ -10,10 +10,9 @@ skipped; the other agents still sync.
 
 See [Dashboard](/guide/dashboard) for reading the result back.
 
-::: warning Google Cloud Storage only
-`--provider gcs` is the only provider so far. The storage layer is
-provider-neutral, so S3-compatible providers can be added without changing the
-data layout or your bucket.
+::: tip Not using Google Cloud?
+`--provider gcs` is the only cloud provider so far. To keep usage on your own machine, or to collect it from
+containers and Docker sandboxes, see [Local Sync and Sandboxes](/guide/local-sync).
 :::
 
 ## What gets uploaded

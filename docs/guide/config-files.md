@@ -421,7 +421,7 @@ The top-level `sync` block records where usage is synced to. `ccusage sync setup
 }
 ```
 
-Setup writes `provider`, `projectId`, `bucket`, `location`, `prefix`, and the identity keys (`machineId`, `userId`, `salt`); leave those alone unless you are moving a machine deliberately, and see [Cloud Sync Setup](/guide/cloud-sync#setup). Three keys are yours to set:
+Setup writes `provider`, `projectId`, `bucket`, `location`, `prefix`, and the identity keys (`machineId`, `userId`, `salt`); leave those alone unless you are moving a machine deliberately, and see [Cloud Sync Setup](/guide/cloud-sync#setup). `provider` is `gcs` (the default), `fs` or `http`; the last two use `dir` and `url` in place of `bucket`, and are described in [Local Sync and Sandboxes](/guide/local-sync). Three keys are yours to set:
 
 | Key              | Default | Effect                                                                                       |
 | ---------------- | ------- | -------------------------------------------------------------------------------------------- |
