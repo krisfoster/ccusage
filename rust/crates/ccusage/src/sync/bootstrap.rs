@@ -123,7 +123,7 @@ pub(crate) fn register_machine(
     machine_id: &str,
 ) -> Result<()> {
     let key = keys.manifest();
-    for _ in 0..MAX_ATTEMPTS {
+    for attempt in 0..MAX_ATTEMPTS {
         let (mut document, generation) = match store.get(&key).map_err(|error| error.to_string())? {
             Some((body, meta)) => (
                 serde_json::from_slice::<Value>(&body)
@@ -166,7 +166,11 @@ pub(crate) fn register_machine(
             &precondition,
         ) {
             Ok(_) => return Ok(()),
-            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(ObjectStoreError::Conflict { .. }) => {
+                if attempt + 1 < MAX_ATTEMPTS {
+                    super::failures::pause_after_conflict(attempt);
+                }
+            }
             Err(error) => return Err(error.to_string()),
         }
     }
@@ -184,7 +188,7 @@ pub(crate) fn unregister_machine(
     machine_id: &str,
 ) -> Result<()> {
     let key = keys.manifest();
-    for _ in 0..MAX_ATTEMPTS {
+    for attempt in 0..MAX_ATTEMPTS {
         let Some((body, meta)) = store.get(&key).map_err(|error| error.to_string())? else {
             return Ok(());
         };
@@ -215,7 +219,11 @@ pub(crate) fn unregister_machine(
             &precondition,
         ) {
             Ok(_) => return Ok(()),
-            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(ObjectStoreError::Conflict { .. }) => {
+                if attempt + 1 < MAX_ATTEMPTS {
+                    super::failures::pause_after_conflict(attempt);
+                }
+            }
             Err(error) => return Err(error.to_string()),
         }
     }

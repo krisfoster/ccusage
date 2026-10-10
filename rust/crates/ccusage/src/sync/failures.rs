@@ -7,6 +7,8 @@
 //! things went wrong and what to do about it, because "permission denied" on
 //! its own sends people to the wrong place.
 
+use std::{thread, time::Duration};
+
 use ccusage_objectstore::ObjectStoreError;
 
 /// How far apart the two clocks have to be before a sync is refused.
@@ -16,6 +18,25 @@ use ccusage_objectstore::ObjectStoreError;
 /// hour, days land under the wrong date and the dedupe keys of two machines
 /// stop lining up — which is silent, and worse than stopping.
 pub(crate) const SKEW_REFUSE_MS: i64 = 3_600_000;
+
+/// Waits a random moment after losing a compare-and-swap.
+///
+/// The manifest and the rollups have one writer per machine, and machines that sync on the same
+/// schedule, or that were all started together, reach them at the same instant. Retrying at once
+/// just reproduces the collision, and the unlucky ones spend all their attempts before the winners
+/// are out of the way. The ceiling doubles with each attempt, and the wait is uniform below it.
+pub(crate) fn pause_after_conflict(attempt: usize) {
+    const BASE_MS: u64 = 8;
+    const CAP_MS: u64 = 200;
+    let ceiling = (BASE_MS << attempt.min(5)).min(CAP_MS);
+    let mut entropy = [0u8; 4];
+    let wait = if getrandom::fill(&mut entropy).is_ok() {
+        u64::from(u32::from_le_bytes(entropy)) % (ceiling + 1)
+    } else {
+        ceiling / 2
+    };
+    thread::sleep(Duration::from_millis(wait));
+}
 
 /// Turns a store error into something the user can act on.
 pub(crate) fn explain(error: &ObjectStoreError) -> String {
@@ -59,6 +80,16 @@ pub(crate) fn check_clock(server_ms: Option<i64>, now_ms: i64) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pause_after_a_conflict_stays_under_its_cap() {
+        let started = std::time::Instant::now();
+        for attempt in [0, 1, 5, 40] {
+            pause_after_conflict(attempt);
+        }
+        // Four pauses, each below the 200 ms cap, with generous room for a loaded machine.
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     /// Credentials that expire mid-run are the common case for a long sync,
     /// and the one where the user most needs to be told that re-running is

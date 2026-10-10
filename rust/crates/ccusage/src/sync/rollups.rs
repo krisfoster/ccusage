@@ -114,7 +114,7 @@ pub(crate) fn refresh(
     user_id: &str,
     now: &str,
 ) -> Result<RollupSummary> {
-    for _ in 0..MAX_ATTEMPTS {
+    for attempt in 0..MAX_ATTEMPTS {
         let DailyRead {
             mut daily,
             generation,
@@ -239,7 +239,12 @@ pub(crate) fn refresh(
             generation.as_deref(),
         ) {
             Ok(()) => {}
-            Err(ObjectStoreError::Conflict { .. }) => continue,
+            Err(ObjectStoreError::Conflict { .. }) => {
+                if attempt + 1 < MAX_ATTEMPTS {
+                    super::failures::pause_after_conflict(attempt);
+                }
+                continue;
+            }
             Err(error) => return Err(error.to_string()),
         }
 
