@@ -474,6 +474,15 @@ fn serve_locally(
         }
     }
 
+    // The sessions behind the totals, for the page's drill-down. Optional for the same reason.
+    if let Ok(found) = super::sessions::collect(store, keys)
+        && !found.sessions.is_empty()
+        && let Ok(bytes) =
+            serde_json::to_vec(&super::sessions::to_json(&found, &super::run::iso_now()))
+    {
+        data.push(("data/sessions.json".to_string(), bytes));
+    }
+
     let listener = bind_local()?;
     let port = listener
         .local_addr()

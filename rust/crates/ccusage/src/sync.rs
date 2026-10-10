@@ -23,6 +23,7 @@ pub(crate) mod remove;
 pub(crate) mod rollups;
 pub(crate) mod run;
 pub(crate) mod serve;
+pub(crate) mod sessions;
 pub(crate) mod share;
 pub(crate) mod sources;
 pub(crate) mod status;
