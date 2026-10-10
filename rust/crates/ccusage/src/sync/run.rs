@@ -8,7 +8,7 @@
 
 use ccusage_config::ConfigContext;
 use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, UtcDate};
-use ccusage_sync::{FoldContext, Salt, Shard, fold, is_finalized};
+use ccusage_sync::{FoldContext, ParsedShard, Salt, Shard, fold, is_finalized};
 
 use super::machine::{self, IndexEntry, MachineIndex};
 use super::now_ms;
@@ -281,6 +281,8 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
     let skipped = skipped(&loaded);
 
     let summary = if args.dry_run {
+        let plan = retain_uploaded(&store, &keys, &user_id, &machine_id, plan, &index)
+            .map_err(cli_error)?;
         if let Some(keep_days) = args.prune {
             let pruned = maintenance::prune(&store, &keys, &user_id, keep_days, now_ms(), true)
                 .map_err(cli_error)?;
@@ -313,16 +315,21 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncRunArgs) -> Result<()> 
             now_ms(),
         )
         .map_err(cli_error)?;
-        for line in written.notes {
+        for line in &written.notes {
             println!("{line}");
         }
+        // What the commit really wrote, not what the plan asked for: a day that only lost entries
+        // locally is kept as it was uploaded and counts as current.
+        let mut uploaded = written.written;
+        uploaded.sort_unstable();
+        uploaded.dedup();
         RunSummary {
-            uploaded: plan.dates(),
-            unchanged: plan.unchanged,
+            uploaded,
+            unchanged: written.unchanged,
             agents,
             skipped,
-            late_edits: plan.late_edits,
-            unhashable: plan.unhashable,
+            late_edits: written.late_edits,
+            unhashable: written.unhashable,
         }
     };
     println!("{}", summary.to_text(args.dry_run));
@@ -336,6 +343,12 @@ pub(crate) struct Commit {
     pub written: Vec<String>,
     /// Lines to print: the prune and rollup summaries, in the order they ran.
     pub notes: Vec<String>,
+    /// Days already in the bucket as they should be, including days kept as uploaded.
+    pub unchanged: usize,
+    /// Finalized days that were rewritten with different content.
+    pub late_edits: Vec<String>,
+    /// Days that could not be turned into a shard.
+    pub unhashable: Vec<String>,
 }
 
 /// Every write a run makes, in the one order that keeps a half-finished run
@@ -360,6 +373,8 @@ pub(crate) fn commit(
     // and the rollups only read machines the roster names. Without this, such
     // a machine would upload shards nothing ever counts.
     bootstrap::register_machine(store, keys, user_id, machine_id)?;
+    let index = machine::load_index(store, keys, user_id, machine_id)?;
+    let plan = retain_uploaded(store, keys, user_id, machine_id, plan.clone(), &index)?;
     let written = upload(store, keys, user_id, machine_id, &plan.uploads, now, now_ms)?;
     machine::update_machine(store, keys, user_id, machine_id, |record| {
         record.last_sync_at = Some(now.to_string());
@@ -375,7 +390,81 @@ pub(crate) fn commit(
     // uploaded since the last pass, and the rollups are what the dashboard
     // reads.
     notes.push(rollups::refresh(store, keys, user_id, now)?.to_text());
-    Ok(Commit { written, notes })
+    Ok(Commit {
+        written,
+        notes,
+        unchanged: plan.unchanged,
+        late_edits: plan.late_edits,
+        unhashable: plan.unhashable,
+    })
+}
+
+/// Folds what this machine uploaded for a day before into the fresh fold of the same day, so
+/// usage that has since left its logs is not erased.
+///
+/// Agents delete old session files by age, and a day is made of entries from several of them, so a
+/// day can outlive part of its own usage. `plan_uploads` trusts the local logs completely, which
+/// is right for a day that grew or changed but would replace a larger uploaded shard with a smaller
+/// one here. Only days this machine has uploaded before are looked at, so a first sync reads
+/// nothing, and one read is made per changed day.
+///
+/// A shard that cannot be read back (missing, corrupt, or written by a newer ccusage) is left to
+/// the local fold, as before.
+pub(crate) fn retain_uploaded(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    user_id: &str,
+    machine_id: &str,
+    plan: UploadPlan,
+    index: &MachineIndex,
+) -> std::result::Result<UploadPlan, String> {
+    let mut reconciled = UploadPlan {
+        unchanged: plan.unchanged,
+        unhashable: plan.unhashable,
+        ..UploadPlan::default()
+    };
+    for mut shard in plan.uploads {
+        if index
+            .shards
+            .contains_key(&MachineIndex::entry_key(&shard.agent, &shard.utc_date))
+        {
+            let key = keys
+                .shard(
+                    user_id,
+                    machine_id,
+                    &shard.agent,
+                    parse_date(&shard.utc_date)?,
+                )
+                .map_err(|error| error.to_string())?;
+            let stored = store.get(&key).map_err(|error| failures::explain(&error))?;
+            if let Some((body, _)) = stored
+                && let Ok(ParsedShard::Known(previous)) = Shard::parse(&body)
+            {
+                let mut merged = shard.clone().retaining(&previous);
+                match merged.finish() {
+                    Ok(_) => shard = merged,
+                    Err(error) => {
+                        reconciled
+                            .unhashable
+                            .push(format!("{} {} ({error})", shard.agent, shard.utc_date));
+                        continue;
+                    }
+                }
+            }
+        }
+        let hash = shard.content_hash.clone().unwrap_or_default();
+        if index.is_current(&shard.agent, &shard.utc_date, &hash) {
+            reconciled.unchanged += 1;
+            continue;
+        }
+        if index.is_finalized(&shard.agent, &shard.utc_date)
+            && !reconciled.late_edits.contains(&shard.utc_date)
+        {
+            reconciled.late_edits.push(shard.utc_date.clone());
+        }
+        reconciled.uploads.push(shard);
+    }
+    Ok(reconciled)
 }
 
 /// Agents that failed to load, named with the reason so the user can tell a
@@ -424,7 +513,7 @@ fn configured_salt(config: &ConfigContext) -> Result<Salt> {
     Salt::parse(&configured).map_err(|error| cli_error(error.to_string()))
 }
 
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     format_rfc3339_millis(ccusage_core::TimestampMs::from_millis(now_ms()))
 }
 

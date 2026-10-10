@@ -312,6 +312,64 @@ impl Shard {
     }
 }
 
+impl Shard {
+    /// Folds in what this machine uploaded for the same day before, so usage that has since left
+    /// its logs is not lost.
+    ///
+    /// Agents delete old session files by age, and a day is made of entries from several files, so
+    /// a day can outlive some of its own usage. Recomputing the shard from what remains would
+    /// shrink it, and replacing the uploaded one would erase usage that happened. Merging is done
+    /// per cell, which is the finest grain at which entries are still individually identifiable:
+    ///
+    /// - a cell holding every entry the previous one did is the newer, and wins (the day grew);
+    /// - a cell holding only some of them is what is left after pruning, and the previous one stays;
+    /// - cells that each hold entries the other lacks cannot be summed, because a cell carries one
+    ///   total rather than one per entry, so the larger total stands, and the newer one on a tie;
+    /// - a cell only the previous shard has stays, and a cell only this one has is added.
+    ///
+    /// The result never has fewer tokens in a cell than either input.
+    #[must_use]
+    pub fn retaining(mut self, previous: &Shard) -> Shard {
+        use std::collections::BTreeMap;
+
+        let mut cells: BTreeMap<(u16, String), Cell> = previous
+            .cells
+            .iter()
+            .map(|cell| ((cell.bucket, cell.model.clone()), cell.clone()))
+            .collect();
+        for cell in std::mem::take(&mut self.cells) {
+            let key = (cell.bucket, cell.model.clone());
+            let kept = match cells.remove(&key) {
+                Some(old) => Cell::newer_or_fuller(cell, old),
+                None => cell,
+            };
+            cells.insert(key, kept);
+        }
+        self.cells = cells.into_values().collect();
+
+        let mut sessions: BTreeMap<String, Session> = previous
+            .sessions
+            .iter()
+            .map(|session| (session.id.clone(), session.clone()))
+            .collect();
+        for session in std::mem::take(&mut self.sessions) {
+            let merged = match sessions.remove(&session.id) {
+                Some(old) => Session {
+                    id: session.id,
+                    project: session.project.or(old.project),
+                    first: session.first.min(old.first),
+                    last: session.last.max(old.last),
+                    cost: session.cost.max(old.cost),
+                },
+                None => session,
+            };
+            sessions.insert(merged.id.clone(), merged);
+        }
+        self.sessions = sessions.into_values().collect();
+        self
+    }
+}
+
 impl Cell {
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
@@ -319,6 +377,29 @@ impl Cell {
 
     fn is_empty(&self) -> bool {
         self.total_tokens() == 0 && self.messages == 0 && self.keys.is_empty()
+    }
+
+    /// Which of two versions of one cell to keep; see [`Shard::retaining`].
+    fn newer_or_fuller(newer: Cell, older: Cell) -> Cell {
+        let (newer_keys, older_keys): (
+            std::collections::BTreeSet<_>,
+            std::collections::BTreeSet<_>,
+        ) = (
+            newer.keys.iter().copied().collect(),
+            older.keys.iter().copied().collect(),
+        );
+        let comparable = !newer_keys.is_empty() && !older_keys.is_empty();
+        if comparable && newer_keys.is_superset(&older_keys) {
+            return newer;
+        }
+        if comparable && older_keys.is_superset(&newer_keys) {
+            return older;
+        }
+        if older.total_tokens() > newer.total_tokens() {
+            older
+        } else {
+            newer
+        }
     }
 }
 
@@ -383,6 +464,191 @@ mod tests {
                 count: 0,
             },
             content_hash: None,
+        }
+    }
+
+    /// A cell whose size is chosen, so which side a merge kept can be read off the tokens.
+    fn sized(bucket: u16, model: &str, keys: &[u64], input: u64) -> Cell {
+        Cell {
+            input_tokens: input,
+            ..cell(bucket, model, keys)
+        }
+    }
+
+    fn inputs(shard: &Shard) -> Vec<(u16, u64)> {
+        shard
+            .cells
+            .iter()
+            .map(|cell| (cell.bucket, cell.input_tokens))
+            .collect()
+    }
+
+    #[test]
+    fn a_cell_that_lost_entries_keeps_the_fuller_one_from_before() {
+        let before = shard(vec![sized(4, "m", &[1, 2, 3], 300)]);
+        let now = shard(vec![sized(4, "m", &[3], 100)]);
+
+        assert_eq!(inputs(&now.retaining(&before)), vec![(4, 300)]);
+    }
+
+    #[test]
+    fn a_cell_that_gained_entries_takes_the_new_one() {
+        let before = shard(vec![sized(4, "m", &[1, 2], 200)]);
+        let now = shard(vec![sized(4, "m", &[1, 2, 3], 300)]);
+
+        assert_eq!(inputs(&now.retaining(&before)), vec![(4, 300)]);
+    }
+
+    #[test]
+    fn a_cell_with_the_same_entries_takes_the_new_one_so_a_price_change_applies() {
+        let before = shard(vec![Cell {
+            cost: 1.0,
+            ..sized(4, "m", &[1, 2], 200)
+        }]);
+        let now = shard(vec![Cell {
+            cost: 2.0,
+            ..sized(4, "m", &[1, 2], 200)
+        }]);
+
+        let merged = now.retaining(&before);
+
+        assert!((merged.cells[0].cost - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cells_that_each_hold_something_the_other_lacks_keep_the_larger_total() {
+        let before = shard(vec![sized(4, "m", &[1, 2], 200)]);
+        let now = shard(vec![sized(4, "m", &[2, 3], 150)]);
+        assert_eq!(inputs(&now.clone().retaining(&before)), vec![(4, 200)]);
+
+        let now_larger = shard(vec![sized(4, "m", &[2, 3], 250)]);
+        assert_eq!(inputs(&now_larger.retaining(&before)), vec![(4, 250)]);
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_newer_cell() {
+        let before = shard(vec![Cell {
+            cost: 1.0,
+            ..sized(4, "m", &[1, 2], 200)
+        }]);
+        let now = shard(vec![Cell {
+            cost: 2.0,
+            ..sized(4, "m", &[2, 3], 200)
+        }]);
+
+        assert!((now.retaining(&before).cells[0].cost - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cells_without_keys_are_compared_by_their_totals() {
+        let before = shard(vec![sized(4, "m", &[], 300)]);
+        let shrunk = shard(vec![sized(4, "m", &[], 100)]);
+        let grown = shard(vec![sized(4, "m", &[], 500)]);
+
+        assert_eq!(inputs(&shrunk.retaining(&before)), vec![(4, 300)]);
+        assert_eq!(inputs(&grown.retaining(&before)), vec![(4, 500)]);
+    }
+
+    #[test]
+    fn cells_present_on_only_one_side_are_all_kept() {
+        let before = shard(vec![sized(4, "m", &[1], 100), sized(5, "m", &[2], 200)]);
+        let now = shard(vec![sized(5, "m", &[2], 200), sized(6, "m", &[3], 300)]);
+
+        assert_eq!(
+            inputs(&now.retaining(&before)),
+            vec![(4, 100), (5, 200), (6, 300)]
+        );
+    }
+
+    #[test]
+    fn the_same_bucket_under_two_models_stays_two_cells() {
+        let before = shard(vec![sized(4, "opus", &[1], 100)]);
+        let now = shard(vec![sized(4, "sonnet", &[2], 200)]);
+
+        let merged = now.retaining(&before);
+
+        assert_eq!(merged.cells.len(), 2);
+    }
+
+    #[test]
+    fn sessions_are_merged_by_id_and_widen_their_span() {
+        let mut before = shard(vec![sized(4, "m", &[1], 100)]);
+        before.sessions = vec![
+            Session {
+                id: "a".to_string(),
+                project: None,
+                first: 100,
+                last: 200,
+                cost: 1.0,
+            },
+            Session {
+                id: "gone".to_string(),
+                project: None,
+                first: 1,
+                last: 2,
+                cost: 0.5,
+            },
+        ];
+        let mut now = shard(vec![sized(4, "m", &[1], 100)]);
+        now.sessions = vec![Session {
+            id: "a".to_string(),
+            project: Some("sha256:p".to_string()),
+            first: 150,
+            last: 300,
+            cost: 0.5,
+        }];
+
+        let merged = now.retaining(&before);
+
+        let ids: Vec<_> = merged
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "gone"]);
+        let a = &merged.sessions[0];
+        assert_eq!((a.first, a.last), (100, 300));
+        assert!((a.cost - 1.0).abs() < f64::EPSILON);
+        assert_eq!(a.project.as_deref(), Some("sha256:p"));
+    }
+
+    #[test]
+    fn merging_the_same_day_again_changes_nothing() {
+        let before = shard(vec![
+            sized(4, "m", &[1, 2, 3], 300),
+            sized(5, "m", &[4], 50),
+        ]);
+        let now = shard(vec![sized(4, "m", &[3], 100)]);
+
+        let mut once = now.retaining(&before);
+        let mut twice = once.clone().retaining(&before);
+        once.finish().expect("finish");
+        twice.finish().expect("finish");
+
+        assert_eq!(once.content_hash, twice.content_hash);
+    }
+
+    #[test]
+    fn nothing_is_lost_from_either_side() {
+        let before = shard(vec![
+            sized(4, "m", &[1, 2, 3], 300),
+            sized(9, "m", &[7], 10),
+        ]);
+        let now = shard(vec![sized(4, "m", &[3, 4], 120), sized(5, "m", &[8], 40)]);
+
+        let merged = now.clone().retaining(&before);
+
+        for side in [&before, &now] {
+            for cell in &side.cells {
+                let kept = merged
+                    .cells
+                    .iter()
+                    .find(|candidate| {
+                        (candidate.bucket, &candidate.model) == (cell.bucket, &cell.model)
+                    })
+                    .expect("the cell is still there");
+                assert!(kept.total_tokens() >= cell.total_tokens());
+            }
         }
     }
 

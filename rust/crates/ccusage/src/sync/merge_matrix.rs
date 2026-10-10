@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, RollupKind};
+use ccusage_objectstore::{KeySpace, ObjectStore, Precondition, RollupKind, UtcDate};
 use ccusage_sync::rollup::Daily;
 use ccusage_sync::shard::{Cell, Dedupe, DedupeKey, SHARD_SCHEMA, Shard};
 use ccusage_test_support::objectstore::{Fault, MemoryStore, Op, When};
@@ -55,6 +55,17 @@ impl Bucket {
         shards: Vec<Shard>,
         now_ms: i64,
     ) -> Result<Vec<String>, String> {
+        self.commit_at(machine_id, shards, now_ms)
+            .map(|commit| commit.written)
+    }
+
+    /// Like `sync_at`, with everything the run reports rather than only what it wrote.
+    fn commit_at(
+        &self,
+        machine_id: &str,
+        shards: Vec<Shard>,
+        now_ms: i64,
+    ) -> Result<run::Commit, String> {
         let plan = self.plan(machine_id, shards)?;
         run::commit(
             self.store.as_ref(),
@@ -66,7 +77,6 @@ impl Bucket {
             NOW,
             now_ms,
         )
-        .map(|commit| commit.written)
     }
 
     fn plan(&self, machine_id: &str, shards: Vec<Shard>) -> Result<UploadPlan, String> {
@@ -280,6 +290,128 @@ fn a_day_that_vanishes_locally_stays_in_the_bucket() {
     assert_eq!(bucket.shard_keys().len(), 3);
     assert_eq!(bucket.input_tokens(), 600);
     assert_converged(&bucket);
+}
+
+/// S5b: a day loses some of its entries locally. Claude Code deletes old session
+/// files by age, and a day is made of entries from several files, so a day can
+/// outlive some of its own usage. The shard recomputed from what is left is smaller
+/// than the one already in the bucket, and replacing it would erase usage that
+/// happened. The bucket keeps the larger side.
+#[test]
+fn a_day_that_loses_part_of_its_entries_locally_keeps_what_was_uploaded() {
+    let bucket = Bucket::new();
+    bucket
+        .sync(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 300, &[1, 2, 3])],
+        )
+        .expect("first");
+
+    bucket
+        .sync(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 100, &[3])],
+        )
+        .expect("second");
+
+    assert_eq!(
+        bucket.input_tokens(),
+        300,
+        "the pruned entries were not lost"
+    );
+    assert_converged(&bucket);
+}
+
+/// S5c: once a day has been trimmed by pruning, running again changes nothing. The recomputed shard
+/// never matches the index, so this is what keeps every later sync from rewriting the day.
+#[test]
+fn a_pruned_day_is_left_alone_on_every_later_run() {
+    let bucket = Bucket::new();
+    let full = shard_with_keys("aaaa", "2026-09-10", 300, &[1, 2, 3]);
+    let pruned = shard_with_keys("aaaa", "2026-09-10", 100, &[3]);
+    bucket.sync("aaaa", vec![full]).expect("first");
+
+    let second = bucket
+        .commit_at("aaaa", vec![pruned.clone()], NOW_MS)
+        .expect("second");
+    let third = bucket
+        .commit_at("aaaa", vec![pruned], NOW_MS)
+        .expect("third");
+
+    assert!(
+        second.written.is_empty(),
+        "nothing needed uploading: {:?}",
+        second.written
+    );
+    assert_eq!(second.unchanged, 1);
+    assert!(third.written.is_empty());
+    assert_eq!(bucket.input_tokens(), 300);
+}
+
+/// S5d: a settled day that only lost entries is not a late edit, because nothing was rewritten.
+/// A settled day that gained entries still is.
+#[test]
+fn a_settled_day_is_reported_as_edited_only_when_it_is_rewritten() {
+    let bucket = Bucket::new();
+    let settled = NOW_MS + 30 * 24 * 60 * 60 * 1000;
+    bucket
+        .commit_at(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 300, &[1, 2, 3])],
+            settled,
+        )
+        .expect("first");
+
+    let trimmed = bucket
+        .commit_at(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 100, &[3])],
+            settled,
+        )
+        .expect("trimmed");
+    assert!(trimmed.late_edits.is_empty(), "{:?}", trimmed.late_edits);
+
+    let grown = bucket
+        .commit_at(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 400, &[1, 2, 3, 4])],
+            settled,
+        )
+        .expect("grown");
+    assert_eq!(grown.late_edits, vec!["2026-09-10".to_string()]);
+    assert_eq!(bucket.input_tokens(), 400);
+}
+
+/// S5e: an uploaded shard that cannot be read back does not block the sync. The machine's own
+/// logs are all there is to go on, so they are used, as they were before pruning was handled.
+#[test]
+fn an_unreadable_uploaded_shard_is_replaced_by_the_local_fold() {
+    let bucket = Bucket::new();
+    bucket
+        .sync(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 300, &[1, 2, 3])],
+        )
+        .expect("first");
+    let key = bucket
+        .keys
+        .shard(
+            USER,
+            "aaaa",
+            AGENT,
+            UtcDate::new(2026, 9, 10).expect("date"),
+        )
+        .expect("key");
+    bucket.store.seed(&key, b"this is not a shard");
+
+    bucket
+        .sync(
+            "aaaa",
+            vec![shard_with_keys("aaaa", "2026-09-10", 100, &[3])],
+        )
+        .expect("second");
+
+    assert_eq!(bucket.input_tokens(), 100);
 }
 
 /// S6: two machines, different work.
