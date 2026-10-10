@@ -462,9 +462,9 @@
 	"sync_setup_options": [
 		{
 			"flags": "--provider <provider>",
-			"description": "Object storage provider",
+			"description": "Where usage is stored: a Google Cloud bucket, a local directory, or a hub reached over HTTP",
 			"default": "gcs",
-			"choices": ["gcs"]
+			"choices": ["gcs", "fs", "http"]
 		},
 		{
 			"flags": "-p, --project <project>",
@@ -475,6 +475,24 @@
 			"flags": "--bucket <bucket>",
 			"description": "Bucket to sync into",
 			"default": "created for you"
+		},
+		{
+			"flags": "--dir <dir>",
+			"description": "Directory to keep usage in (fs provider)"
+		},
+		{
+			"flags": "--url <url>",
+			"description": "Address of a 'ccusage sync serve' hub (http provider); the bearer token is read from CCUSAGE_SYNC_TOKEN"
+		},
+		{
+			"flags": "--machine-id <id>",
+			"description": "Sync as this machine id instead of minting one",
+			"default": "minted"
+		},
+		{
+			"flags": "--machine-label <label>",
+			"description": "Name the dashboard shows for this machine",
+			"default": "none"
 		},
 		{
 			"flags": "--location <location>",
@@ -500,6 +518,33 @@
 		{
 			"flags": "--recreate",
 			"description": "Replace the configured bucket instead of reusing it",
+			"default": "false"
+		}
+	],
+	"sync_serve_options": [
+		{
+			"flags": "--dir <dir>",
+			"description": "Directory to serve; usage is stored here",
+			"default": "the sync.dir setting"
+		},
+		{
+			"flags": "--listen <address>",
+			"description": "Address and port to listen on",
+			"default": "127.0.0.1:8777"
+		},
+		{
+			"flags": "--token-file <path>",
+			"description": "File holding the bearer token clients must present; created with a random token if missing",
+			"default": "~/.config/ccusage/hub-token"
+		},
+		{
+			"flags": "--prefix <prefix>",
+			"description": "Key prefix the hub serves",
+			"default": "ccusage/v1"
+		},
+		{
+			"flags": "--allow-delete",
+			"description": "Let clients delete objects (otherwise only the doctor probe can be deleted)",
 			"default": "false"
 		}
 	],

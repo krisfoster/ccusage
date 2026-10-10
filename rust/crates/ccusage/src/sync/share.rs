@@ -260,6 +260,9 @@ fn provision(
 /// `ccusage sync share`: turn share links on, or off again.
 pub(crate) fn execute(config: &ConfigContext, args: &SyncShareArgs) -> crate::Result<()> {
     let status = status::Status::from_config(config.sync());
+    if let Some(reason) = status.not_a_bucket("ccusage sync share") {
+        return Err(cli_error(reason));
+    }
     let Some(bucket) = status.bucket.clone() else {
         return Err(cli_error(
             "sync is not configured. Run 'ccusage sync setup' first.".to_string(),

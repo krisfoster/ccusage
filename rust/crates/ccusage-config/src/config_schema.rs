@@ -70,6 +70,10 @@ pub struct SyncConfig {
     pub project_id: Option<String>,
     /// Bucket usage data is synced to.
     pub bucket: Option<String>,
+    /// Directory usage data is kept in, for the `fs` provider.
+    pub dir: Option<String>,
+    /// Address of a `ccusage sync serve` hub, for the `http` provider.
+    pub url: Option<String>,
     /// Location used when ccusage creates the bucket.
     pub location: Option<String>,
     /// Key prefix inside the bucket.
@@ -115,6 +119,8 @@ pub struct SyncDashboardConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigSyncProvider {
     Gcs,
+    Fs,
+    Http,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]

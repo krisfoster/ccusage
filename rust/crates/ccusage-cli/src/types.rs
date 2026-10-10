@@ -65,6 +65,7 @@ pub enum SyncCommand {
     Remove(SyncRemoveArgs),
     Share(SyncShareArgs),
     Dashboard(SyncDashboardArgs),
+    Serve(SyncServeArgs),
 }
 
 impl SyncCommand {
@@ -81,6 +82,7 @@ impl SyncCommand {
             Self::Remove(_) => "remove",
             Self::Share(_) => "share",
             Self::Dashboard(_) => "dashboard",
+            Self::Serve(_) => "serve",
         }
     }
 }
@@ -98,12 +100,33 @@ pub struct SyncSetupArgs {
     pub provider: SyncProvider,
     pub project: Option<String>,
     pub bucket: Option<String>,
+    /// Directory the `fs` provider keeps usage in.
+    pub dir: Option<String>,
+    /// Address of the hub the `http` provider syncs through.
+    pub url: Option<String>,
+    /// Pins the identity this machine syncs as, instead of minting one.
+    pub machine_id: Option<String>,
+    /// The name the dashboard shows for this machine.
+    pub machine_label: Option<String>,
     pub location: Option<String>,
     pub prefix: Option<String>,
     pub auth: SyncAuthMode,
     pub non_interactive: bool,
     /// Allows replacing an already configured bucket, which setup otherwise refuses to do.
     pub recreate: bool,
+}
+
+/// Serving a directory to other processes, such as sandboxes, over HTTP.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncServeArgs {
+    /// Falls back to the `sync.dir` setting.
+    pub dir: Option<String>,
+    pub listen: Option<String>,
+    pub token_file: Option<String>,
+    pub prefix: Option<String>,
+    /// Permits clients to delete objects. Off by default, so a compromised client cannot erase
+    /// history.
+    pub allow_delete: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -176,6 +199,10 @@ pub const MAX_SHARE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub enum SyncProvider {
     #[default]
     Gcs,
+    /// A directory on this machine.
+    Fs,
+    /// A `ccusage sync serve` hub reached over HTTP.
+    Http,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

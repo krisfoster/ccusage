@@ -70,6 +70,9 @@ const ATTRIBUTION: &str = "Model prices from LiteLLM's model_prices_and_context_
 
 pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Result<()> {
     let status = status::Status::from_config(config.sync());
+    if status.kind() != status::Kind::Gcs {
+        return serve_local_store(config, &status, args);
+    }
     let Some(bucket) = status.bucket.clone() else {
         return Err(cli_error(
             "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
@@ -158,6 +161,36 @@ pub(crate) fn execute(config: &ConfigContext, args: &SyncDashboardArgs) -> Resul
         }
         None => serve_locally(&store, &keys, &public, args.open),
     }
+}
+
+/// A directory or a hub has nothing to publish to, so the dashboard is only ever hosted on this
+/// machine, from whatever the store holds.
+fn serve_local_store(
+    config: &ConfigContext,
+    status: &status::Status,
+    args: &SyncDashboardArgs,
+) -> Result<()> {
+    if args.deploy || args.share {
+        let flag = if args.deploy { "--deploy" } else { "--share" };
+        return Err(cli_error(
+            status
+                .not_a_bucket(&format!("ccusage sync dashboard {flag}"))
+                .unwrap_or_default(),
+        ));
+    }
+    if !status.is_configured() {
+        return Err(cli_error(
+            "sync is not configured. Run 'ccusage sync setup' first.".to_string(),
+        ));
+    }
+    let keys = KeySpace::new(&status.prefix).map_err(|error| cli_error(error.to_string()))?;
+    let store = super::open_store(config, status)?;
+    let public = public_data(&PricingMap::load_with_overrides(
+        false,
+        false,
+        std::collections::BTreeMap::new().iter(),
+    ));
+    serve_locally(&store, &keys, &public, args.open)
 }
 
 /// The key that signs share links: the one `sync share` stored, or an HMAC
@@ -403,7 +436,7 @@ fn public_data(pricing: &PricingMap) -> Vec<(String, Vec<u8>, &'static str)> {
 /* ------------------------------------------------------------ local server */
 
 fn serve_locally(
-    store: &GcsStore,
+    store: &dyn ObjectStore,
     keys: &KeySpace,
     public: &[(String, Vec<u8>, &'static str)],
     open: bool,

@@ -1828,8 +1828,135 @@ fn sync_setup_collects_the_full_target_description() {
             auth: SyncAuthMode::Hmac,
             non_interactive: true,
             recreate: true,
+            ..SyncSetupArgs::default()
         }
     );
+}
+
+#[test]
+fn sync_setup_takes_a_local_directory_and_a_pinned_identity() {
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "setup",
+        "--provider",
+        "fs",
+        "--dir",
+        "/data/usage",
+        "--machine-id",
+        "sandbox-1",
+        "--machine-label",
+        "my-sandbox",
+        "--non-interactive",
+    ]);
+
+    let SyncCommand::Setup(setup) = args.command else {
+        panic!("expected setup command");
+    };
+    assert_eq!(setup.provider, SyncProvider::Fs);
+    assert_eq!(setup.dir.as_deref(), Some("/data/usage"));
+    assert_eq!(setup.machine_id.as_deref(), Some("sandbox-1"));
+    assert_eq!(setup.machine_label.as_deref(), Some("my-sandbox"));
+    assert!(setup.non_interactive);
+}
+
+#[test]
+fn sync_setup_takes_a_hub_url() {
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "setup",
+        "--provider",
+        "http",
+        "--url",
+        "http://host.docker.internal:8777",
+    ]);
+
+    let SyncCommand::Setup(setup) = args.command else {
+        panic!("expected setup command");
+    };
+    assert_eq!(setup.provider, SyncProvider::Http);
+    assert_eq!(
+        setup.url.as_deref(),
+        Some("http://host.docker.internal:8777")
+    );
+}
+
+#[test]
+fn sync_serve_collects_its_options_and_defaults_to_refusing_deletes() {
+    let defaults = sync_args(&["ccusage", "sync", "serve"]);
+    assert_eq!(
+        defaults.command,
+        SyncCommand::Serve(SyncServeArgs::default())
+    );
+    let SyncCommand::Serve(defaults) = defaults.command else {
+        panic!("expected serve command");
+    };
+    assert!(!defaults.allow_delete);
+
+    let args = sync_args(&[
+        "ccusage",
+        "sync",
+        "serve",
+        "--dir",
+        "/data/usage",
+        "--listen",
+        "127.0.0.1:9000",
+        "--token-file",
+        "/tmp/token",
+        "--prefix",
+        "ccusage/v1",
+        "--allow-delete",
+    ]);
+    assert_eq!(
+        args.command,
+        SyncCommand::Serve(SyncServeArgs {
+            dir: Some("/data/usage".to_string()),
+            listen: Some("127.0.0.1:9000".to_string()),
+            token_file: Some("/tmp/token".to_string()),
+            prefix: Some("ccusage/v1".to_string()),
+            allow_delete: true,
+        })
+    );
+}
+
+#[test]
+fn sync_setup_flags_win_over_the_directory_and_url_in_config() {
+    let fixture = fs_fixture!({
+        "ccusage.json": r#"{
+            "sync": { "provider": "fs", "dir": "/from/config", "url": "http://from-config" }
+        }"#,
+    });
+    let config_path = fixture.path("ccusage.json").to_string_lossy().into_owned();
+    let args = [
+        "sync",
+        "setup",
+        "--dir",
+        "/from/flag",
+        "--config",
+        config_path.as_str(),
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let config = ccusage_config::ConfigContext::from_args(&args);
+
+    let cli = Cli::parse_from_with_config(
+        std::iter::once(OsString::from("ccusage")).chain(args.iter().map(OsString::from)),
+        &config,
+        ccusage_core::DEFAULT_SESSION_DURATION_HOURS,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("sync setup parses with a config block");
+    let Some(Command::Sync(sync)) = cli.command else {
+        panic!("expected a sync command");
+    };
+    let SyncCommand::Setup(setup) = sync.command else {
+        panic!("expected sync setup");
+    };
+
+    assert_eq!(setup.provider, SyncProvider::Fs);
+    assert_eq!(setup.dir.as_deref(), Some("/from/flag"));
+    assert_eq!(setup.url.as_deref(), Some("http://from-config"));
 }
 
 #[test]
@@ -1860,10 +1987,10 @@ fn sync_setup_rejects_auth_modes_that_are_not_implemented() {
 }
 
 #[test]
-fn sync_setup_rejects_providers_other_than_gcs() {
+fn sync_setup_rejects_providers_it_does_not_know() {
     assert_eq!(
         parse_error(&["ccusage", "sync", "setup", "--provider", "s3"]),
-        "Invalid value for --provider 's3'. Only 'gcs' is supported in this release."
+        "Invalid value for --provider 's3'. Expected gcs, fs, or http."
     );
 }
 

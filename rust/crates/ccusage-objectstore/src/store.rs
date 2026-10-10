@@ -41,3 +41,29 @@ pub trait ObjectStore {
 
     fn delete(&self, key: &Key, precondition: &Precondition) -> Result<()>;
 }
+
+/// Lets a store chosen at run time, such as the one `sync` opens from the user's settings, be
+/// passed anywhere a concrete store is accepted.
+impl<T: ObjectStore + ?Sized> ObjectStore for Box<T> {
+    fn get(&self, key: &Key) -> Result<Option<(Vec<u8>, ObjectMeta)>> {
+        (**self).get(key)
+    }
+
+    fn put(
+        &self,
+        key: &Key,
+        body: &[u8],
+        content_type: &str,
+        precondition: &Precondition,
+    ) -> Result<ObjectMeta> {
+        (**self).put(key, body, content_type, precondition)
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
+        (**self).list(prefix)
+    }
+
+    fn delete(&self, key: &Key, precondition: &Precondition) -> Result<()> {
+        (**self).delete(key, precondition)
+    }
+}

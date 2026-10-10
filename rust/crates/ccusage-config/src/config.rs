@@ -252,7 +252,11 @@ fn parse_sync_config(value: &Value) -> std::result::Result<Option<SyncConfig>, S
             "sync.{path} must not be stored in the config file. Supply credentials through the environment or 'gcloud auth application-default login'"
         )));
     }
-    validate_sync_choice(object.get("provider"), "sync.provider", &["gcs"])?;
+    validate_sync_choice(
+        object.get("provider"),
+        "sync.provider",
+        &["gcs", "fs", "http"],
+    )?;
     validate_sync_choice(
         object
             .get("auth")
@@ -683,6 +687,12 @@ impl ccusage_cli::CliConfig for ConfigContext {
         if let Some(bucket) = sync.bucket.clone() {
             args.bucket = Some(bucket);
         }
+        if let Some(dir) = sync.dir.clone() {
+            args.dir = Some(dir);
+        }
+        if let Some(url) = sync.url.clone() {
+            args.url = Some(url);
+        }
         if let Some(location) = sync.location.clone() {
             args.location = Some(location);
         }
@@ -840,6 +850,8 @@ impl From<ConfigSyncProvider> for SyncProvider {
     fn from(provider: ConfigSyncProvider) -> Self {
         match provider {
             ConfigSyncProvider::Gcs => Self::Gcs,
+            ConfigSyncProvider::Fs => Self::Fs,
+            ConfigSyncProvider::Http => Self::Http,
         }
     }
 }

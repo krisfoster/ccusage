@@ -8,9 +8,13 @@ USAGE:
   ccusage sync setup <OPTIONS>
 
 OPTIONS:
-  --provider <provider>                Object storage provider (default: gcs, choices: gcs)
+  --provider <provider>                Where usage is stored: a Google Cloud bucket, a local directory, or a hub reached over HTTP (default: gcs, choices: gcs | fs | http)
   -p, --project <project>              Cloud project that owns the bucket (default: discovered)
   --bucket <bucket>                    Bucket to sync into (default: created for you)
+  --dir <dir>                          Directory to keep usage in (fs provider)
+  --url <url>                          Address of a 'ccusage sync serve' hub (http provider); the bearer token is read from CCUSAGE_SYNC_TOKEN
+  --machine-id <id>                    Sync as this machine id instead of minting one (default: minted)
+  --machine-label <label>              Name the dashboard shows for this machine (default: none)
   --location <location>                Location for a bucket ccusage creates (default: project default)
   --prefix <prefix>                    Key prefix inside the bucket (default: ccusage/v1)
   --auth <auth>                        Credential source to configure (default: auto, choices: auto | adc | hmac)

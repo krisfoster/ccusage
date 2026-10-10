@@ -18,6 +18,7 @@
 		"sync_forget_combined_options": ["sync_forget_options", "sync_options"],
 		"sync_remove_combined_options": ["sync_remove_options", "sync_options"],
 		"sync_run_combined_options": ["sync_run_options", "sync_options"],
+		"sync_serve_combined_options": ["sync_serve_options", "sync_options"],
 		"sync_share_combined_options": ["sync_share_options", "sync_options"],
 		"sync_setup_combined_options": ["sync_setup_options", "sync_options"]
 	},
@@ -126,7 +127,7 @@
 			},
 			{
 				"name": "sync",
-				"description": "Sync usage to a cloud storage bucket and publish the dashboard"
+				"description": "Sync usage to a bucket, a local directory or a hub, and view it in a dashboard"
 			}
 		]
 	},
@@ -881,7 +882,7 @@
 		},
 		{
 			"path": ["sync"],
-			"description": "Sync usage to a cloud storage bucket and publish the dashboard.",
+			"description": "Sync usage to a bucket, a local directory or a hub, and view it in a dashboard.",
 			"usage": "ccusage sync <COMMANDS>",
 			"commands": [
 				{
@@ -922,7 +923,11 @@
 				},
 				{
 					"name": "dashboard",
-					"description": "Deploy the dashboard or mint a shareable link"
+					"description": "Open the dashboard, deploy it, or mint a shareable link"
+				},
+				{
+					"name": "serve",
+					"description": "Serve a directory over HTTP so sandboxes can sync into it"
 				}
 			]
 		},
@@ -985,6 +990,12 @@
 			"description": "Deploy the dashboard or mint a shareable link.",
 			"usage": "ccusage sync dashboard <OPTIONS>",
 			"options": "sync_dashboard_combined_options"
+		},
+		{
+			"path": ["sync", "serve"],
+			"description": "Serve a directory over HTTP so sandboxes can sync into it.",
+			"usage": "ccusage sync serve <OPTIONS>",
+			"options": "sync_serve_combined_options"
 		}
 	]
 }

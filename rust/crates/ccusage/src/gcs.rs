@@ -137,7 +137,7 @@ fn jitter_fraction() -> f64 {
 /// creation and IAM — which belong to setup, not to the data path — reuse the
 /// same authorization, status mapping and backoff.
 pub(crate) struct JsonApi {
-    agent: ureq::Agent,
+    pub(crate) agent: ureq::Agent,
     endpoint: String,
     authorizer: Box<dyn Authorizer>,
     retry: RetryPolicy,
@@ -168,7 +168,7 @@ impl JsonApi {
     /// attempts. A [`ObjectStoreError::Conflict`] is never retried: the caller
     /// has to re-read and re-merge, and repeating the same body would either
     /// fail identically or overwrite a write it never saw.
-    fn with_retry<T>(&self, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    pub(crate) fn with_retry<T>(&self, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
         let mut attempts = 0;
         loop {
             match attempt() {
@@ -187,7 +187,7 @@ impl JsonApi {
         }
     }
 
-    fn send_without_body(
+    pub(crate) fn send_without_body(
         &self,
         request: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
     ) -> Result<Response> {
@@ -198,7 +198,7 @@ impl JsonApi {
         finish(request.call())
     }
 
-    fn send_with_body(
+    pub(crate) fn send_with_body(
         &self,
         request: ureq::RequestBuilder<ureq::typestate::WithBody>,
         body: &[u8],
@@ -249,10 +249,10 @@ impl GcsStore {
 
 /// A response reduced to the parts the store reads. Deliberately excludes the
 /// request, whose `authorization` header must never reach a log or an error.
-struct Response {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
 }
 
 fn finish(
@@ -294,7 +294,7 @@ fn finish(
     })
 }
 
-fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(header, _)| header == name)
@@ -303,7 +303,7 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 
 /// Maps a non-2xx response onto the error taxonomy, keeping the server's
 /// message as detail but never the request headers, which carry the token.
-fn status_error(response: &Response, key: &str) -> Option<ObjectStoreError> {
+pub(crate) fn status_error(response: &Response, key: &str) -> Option<ObjectStoreError> {
     if (200..300).contains(&response.status) {
         return None;
     }
@@ -334,7 +334,7 @@ fn error_message(body: &[u8]) -> String {
 
 /// Percent-encodes a path segment, including `/`, which is what the JSON API
 /// wants for an object name embedded in the path.
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {

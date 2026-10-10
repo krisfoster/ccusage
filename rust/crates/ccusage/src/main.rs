@@ -7,6 +7,7 @@ mod credentials;
 mod fs_store;
 mod gcs;
 mod http;
+mod http_store;
 mod sync;
 
 pub(crate) use adapter::claude::{load_daily_summaries, load_entries};

@@ -107,6 +107,9 @@ pub(crate) fn execute(
     config_path: Option<&std::path::Path>,
 ) -> crate::Result<()> {
     let status = status::Status::from_config(config.sync());
+    if let Some(reason) = status.not_a_bucket("ccusage sync remove") {
+        return Err(cli_error(reason));
+    }
     let Some(bucket) = status.bucket.clone() else {
         return Err(cli_error(
             "sync is not configured, so there is nothing in the cloud to remove.".to_string(),

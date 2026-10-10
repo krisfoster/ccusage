@@ -44,7 +44,7 @@ pub(crate) struct Check {
 }
 
 impl Check {
-    fn new(name: &'static str, outcome: Outcome, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(name: &'static str, outcome: Outcome, detail: impl Into<String>) -> Self {
         Self {
             name,
             outcome,

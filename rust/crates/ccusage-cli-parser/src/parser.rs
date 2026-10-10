@@ -7,8 +7,8 @@ use ccusage_cli::{
     CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, MAX_SHARE_TTL_SECONDS,
     OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder,
     StatuslineArgs, SyncArgs, SyncAuthMode, SyncCommand, SyncDashboardArgs, SyncForgetArgs,
-    SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs, SyncRunArgs, SyncSetupArgs,
-    SyncShareArgs, VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
+    SyncMergeMachineArgs, SyncProvider, SyncRemoveArgs, SyncRepairArgs, SyncRunArgs, SyncServeArgs,
+    SyncSetupArgs, SyncShareArgs, VisualBurnRate, WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -444,6 +444,12 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
                         }
                         "-p" | "--project" => args.project = Some(parser.value_for("--project")?),
                         "--bucket" => args.bucket = Some(parser.value_for("--bucket")?),
+                        "--dir" => args.dir = Some(parser.value_for("--dir")?),
+                        "--url" => args.url = Some(parser.value_for("--url")?),
+                        "--machine-id" => args.machine_id = Some(parser.value_for("--machine-id")?),
+                        "--machine-label" => {
+                            args.machine_label = Some(parser.value_for("--machine-label")?)
+                        }
                         "--location" => args.location = Some(parser.value_for("--location")?),
                         "--prefix" => args.prefix = Some(parser.value_for("--prefix")?),
                         "--auth" => args.auth = parse_sync_auth_mode(&parser.value_for("--auth")?)?,
@@ -561,6 +567,27 @@ fn parse_sync_command(parser: &mut ArgParser, config: &dyn CliConfig) -> Result<
             }
             SyncCommand::Dashboard(args)
         }
+        "serve" => {
+            let mut args = SyncServeArgs::default();
+            parse_sync_options(
+                parser,
+                "serve",
+                &mut json,
+                &mut config_path,
+                |flag, parser| {
+                    match flag {
+                        "--dir" => args.dir = Some(parser.value_for("--dir")?),
+                        "--listen" => args.listen = Some(parser.value_for("--listen")?),
+                        "--token-file" => args.token_file = Some(parser.value_for("--token-file")?),
+                        "--prefix" => args.prefix = Some(parser.value_for("--prefix")?),
+                        "--allow-delete" => args.allow_delete = true,
+                        _ => return Ok(false),
+                    }
+                    Ok(true)
+                },
+            )?;
+            SyncCommand::Serve(args)
+        }
         other => return Err(format!("Unknown sync command '{other}'")),
     };
     Ok(Command::Sync(SyncArgs {
@@ -611,8 +638,10 @@ fn sync_positional(parser: &mut ArgParser, subcommand: &str, name: &str) -> Resu
 fn parse_sync_provider(value: &str) -> Result<SyncProvider, String> {
     match value {
         "gcs" => Ok(SyncProvider::Gcs),
+        "fs" => Ok(SyncProvider::Fs),
+        "http" => Ok(SyncProvider::Http),
         _ => Err(format!(
-            "Invalid value for --provider '{value}'. Only 'gcs' is supported in this release."
+            "Invalid value for --provider '{value}'. Expected gcs, fs, or http."
         )),
     }
 }
