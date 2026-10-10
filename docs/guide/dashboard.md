@@ -81,6 +81,29 @@ Consequences worth knowing:
 - A published price table: every comparison model with its input, output, and cache rates per million tokens, each model linking to where its provider states the rate, and every column sortable.
 - A theme switcher — System, Light, or Dark. System follows your operating system and is the default; an explicit choice is remembered in the browser's local storage for that page only, and nothing about it is uploaded.
 
+## Explore your usage
+
+Everything on the page can be narrowed, and the numbers always agree because every panel reads the same slice.
+
+- **Filters** sit in one row above the page: a date range (7, 30 or 90 days back from your latest day with data, or
+  a custom range), then sandbox (machine), agent and model. A sandbox is shown by its `machineLabel`.
+- **Click to drill down.** A row in the Models, Machines or Agents tables, or an entry in the chart's legend, filters
+  the page to it. Click again, or press Reset, to clear it. The choice is kept in the address (`?machine=...&agent=...`),
+  so a view can be bookmarked or sent to someone.
+- **Stack the chart** by sandbox, agent or model. Each entity keeps its colour whatever the filter, because the
+  colour comes from its rank across all your data: eight colours, then one neutral "Other". Hover or focus a day for
+  every series on it, or choose *Show as table* for the same numbers in text.
+- **Weeks and months** are rebuilt from the days on screen whenever a filter is on.
+
+The locally hosted dashboard also reads the sessions behind the totals, which the stored rollups cannot say:
+
+- **Projects** adds up cost per project, and a row filters the sessions to it.
+- **Sessions** lists each session with its project, sandbox, agent, last activity and cost, newest first.
+
+Sessions carry cost only. Token counts are kept per model and 15-minute window, not per session, and the model filter
+does not apply to them. Projects appear as the agent recorded them (Claude Code, for one, names a project by its path with the slashes
+turned into dashes), or as `hashed ...` when `sync.redactProjects` is on, which is the default. A published dashboard has no sessions file, so it shows neither panel.
+
 ## Custom domains
 
 Serving the page from your own domain means putting a CDN or load balancer in front of the bucket (for GCS, a backend bucket behind an HTTPS load balancer). The signed rollup URLs still point at `storage.googleapis.com`, so the page must be allowed to fetch cross-origin — `ccusage sync setup` already configures the bucket's CORS rules for this.
