@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod compare;
 mod credentials;
+mod fs_store;
 mod gcs;
 mod http;
 mod sync;
