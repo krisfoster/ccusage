@@ -32,7 +32,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     process::Command,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ccusage_compare::EquivalenceMap;
@@ -435,12 +435,8 @@ fn public_data(pricing: &PricingMap) -> Vec<(String, Vec<u8>, &'static str)> {
 
 /* ------------------------------------------------------------ local server */
 
-fn serve_locally(
-    store: &dyn ObjectStore,
-    keys: &KeySpace,
-    public: &[(String, Vec<u8>, &'static str)],
-    open: bool,
-) -> Result<()> {
+/// Reads every rollup, and the machine and session documents derived from them, out of the store.
+fn load_local_data(store: &dyn ObjectStore, keys: &KeySpace) -> Result<Vec<(String, Vec<u8>)>> {
     let mut data: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, kind) in [
         ("daily", RollupKind::Daily),
@@ -482,6 +478,21 @@ fn serve_locally(
     {
         data.push(("data/sessions.json".to_string(), bytes));
     }
+    Ok(data)
+}
+
+/// How long a read of the store is reused. A page load makes several requests in a row, and one read
+/// should serve all of them; a reload after this long picks up what a later `sync run` wrote.
+const DATA_MAX_AGE: Duration = Duration::from_secs(2);
+
+fn serve_locally(
+    store: &dyn ObjectStore,
+    keys: &KeySpace,
+    public: &[(String, Vec<u8>, &'static str)],
+    open: bool,
+) -> Result<()> {
+    let mut data = load_local_data(store, keys)?;
+    let mut loaded_at = Instant::now();
 
     let listener = bind_local()?;
     let port = listener
@@ -498,6 +509,14 @@ fn serve_locally(
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        // The store keeps changing while this runs (sandboxes sync into it), so a dashboard that read it
+        // once at startup would show a snapshot forever. If a reload fails, keep serving the last good read.
+        if loaded_at.elapsed() > DATA_MAX_AGE {
+            if let Ok(fresh) = load_local_data(store, keys) {
+                data = fresh;
+            }
+            loaded_at = Instant::now();
+        }
         let _ = respond(stream, &data, public);
     }
     Ok(())
